@@ -14,6 +14,7 @@
  *
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Copyright (c) 2003-2008, PostgreSQL Global Development Group
  *
  * $PostgreSQL: pgsql/src/include/nodes/tidbitmap.h,v 1.6 2008/01/01 19:45:58 momjian Exp $
@@ -100,6 +101,7 @@ typedef struct PagetableEntry
 {
 	BlockNumber blockno;		/* page number (hashtable key) */
 	bool		ischunk;		/* T = lossy storage, F = exact */
+	bool		recheck;		/* should the tuples be rechecked? */
 	tbm_bitmapword	words[Max(WORDS_PER_PAGE, WORDS_PER_CHUNK)];
 } PagetableEntry;
 
@@ -152,6 +154,8 @@ typedef struct
 {
 	BlockNumber blockno;		/* page number containing tuples */
 	int			ntuples;		/* -1 indicates lossy result */
+	bool		recheck;		/* should the tuples be rechecked? */
+	/* Note: recheck is always true if ntuples < 0 */
 	OffsetNumber offsets[1];	/* VARIABLE LENGTH ARRAY */
 } TBMIterateResult;				/* VARIABLE LENGTH STRUCT */
 
@@ -159,7 +163,9 @@ typedef struct
 extern HashBitmap *tbm_create(long maxbytes);
 extern void tbm_free(HashBitmap *tbm);
 
-extern void tbm_add_tuples(HashBitmap *tbm, const ItemPointer tids, int ntids);
+extern void tbm_add_tuples(HashBitmap *tbm,
+						   const ItemPointer tids, int ntids,
+						   bool recheck);
 extern void tbm_union(HashBitmap *a, const HashBitmap *b);
 extern void tbm_intersect(HashBitmap *a, const HashBitmap *b);
 extern bool tbm_is_empty(const HashBitmap *tbm);

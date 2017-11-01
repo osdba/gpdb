@@ -22,12 +22,13 @@
  *	the plan is to be executed forwards, backwards, and for how many tuples.
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/execMain.c,v 1.303.2.3 2009/12/09 21:58:16 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/execMain.c,v 1.313 2008/08/25 22:42:32 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -63,17 +64,19 @@
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h" /* temporary */
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "parser/parse_clause.h"
-#include "parser/parse_expr.h"
-#include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "storage/smgr.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/tqual.h"
+
 #include "utils/ps_status.h"
+#include "utils/snapmgr.h"
 #include "utils/typcache.h"
 #include "utils/workfile_mgr.h"
 #include "utils/faultinjector.h"
@@ -117,12 +120,8 @@ typedef struct evalPlanQual
 
 /* decls for local routines only used within this module */
 static void InitPlan(QueryDesc *queryDesc, int eflags);
-static void initResultRelInfo(ResultRelInfo *resultRelInfo,
-				  Relation resultRelationDesc,
-				  Index resultRelationIndex,
-				  CmdType operation,
-				  bool doInstrument);
 static void ExecCheckPlanOutput(Relation resultRel, List *targetList);
+static void ExecEndPlan(PlanState *planstate, EState *estate);
 static TupleTableSlot *ExecutePlan(EState *estate, PlanState *planstate,
 			CmdType operation,
 			long numberTuples,
@@ -400,6 +399,11 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	{
 		ddesc = makeNode(QueryDispatchDesc);
 		queryDesc->ddesc = ddesc;
+
+		if (queryDesc->dest->mydest == DestIntoRel)
+			queryDesc->ddesc->validate_reloptions = false;
+		else
+			queryDesc->ddesc->validate_reloptions = true;
 
 		/*
 		 * If this is an extended query (normally cursor or bind/exec) - before
@@ -1439,7 +1443,7 @@ InitializeResultRelations(PlannedStmt *plannedstmt, EState *estate, CmdType oper
 			{
 				resultRelation = heap_open(resultRelationOid, lockmode);
 			}
-			initResultRelInfo(resultRelInfo,
+			InitResultRelInfo(resultRelInfo,
 							  resultRelation,
 							  resultRelationIndex,
 							  operation,
@@ -2168,8 +2172,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 /*
  * Initialize ResultRelInfo data for one result relation
  */
-static void
-initResultRelInfo(ResultRelInfo *resultRelInfo,
+void
+InitResultRelInfo(ResultRelInfo *resultRelInfo,
 				  Relation resultRelationDesc,
 				  Index resultRelationIndex,
 				  CmdType operation,
@@ -2386,11 +2390,11 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 	/*
 	 * Make the new entry in the right context.  Currently, we don't need any
 	 * index information in ResultRelInfos used only for triggers, so tell
-	 * initResultRelInfo it's a DELETE.
+	 * InitResultRelInfo it's a DELETE.
 	 */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 	rInfo = makeNode(ResultRelInfo);
-	initResultRelInfo(rInfo,
+	InitResultRelInfo(rInfo,
 					  rel,
 					  0,		/* dummy rangetable index */
 					  CMD_DELETE,
@@ -3164,7 +3168,11 @@ ExecInsert(TupleTableSlot *slot,
 		}
 		else
 		{
-			tuple = ExecFetchSlotHeapTuple(partslot);
+			/*
+			 * Make a modifiable copy, since external_insert() takes the
+			 * liberty to modify the tuple.
+			 */
+			tuple = ExecCopySlotHeapTuple(partslot);
 		}
 	}
 	else
@@ -3214,14 +3222,13 @@ ExecInsert(TupleTableSlot *slot,
 			}
 		}
 	}
+
 	/*
 	 * Check the constraints of the tuple
 	 */
-	if (resultRelationDesc->rd_att->constr &&
-			planGen == PLANGEN_PLANNER)
-	{
+	if (resultRelationDesc->rd_att->constr)
 		ExecConstraints(resultRelInfo, partslot, estate);
-	}
+
 	/*
 	 * insert the tuple
 	 *
@@ -4698,6 +4705,7 @@ OpenIntoRel(QueryDesc *queryDesc)
 	char	   *intoTableSpaceName;
     GpPolicy   *targetPolicy;
 	bool		bufferPoolBulkLoad;
+	bool		validate_reloptions;
 
 	RelFileNode relFileNode;
 	
@@ -4800,12 +4808,17 @@ OpenIntoRel(QueryDesc *queryDesc)
 									 false);
 
 	/* get the relstorage (heap or AO tables) */
-	stdRdOptions = (StdRdOptions*) heap_reloptions(relkind, reloptions, true);
+	if (queryDesc->ddesc)
+		validate_reloptions = queryDesc->ddesc->validate_reloptions;
+	else
+		validate_reloptions = true;
+
+	stdRdOptions = (StdRdOptions*) heap_reloptions(relkind, reloptions, validate_reloptions);
 	if(stdRdOptions->appendonly)
 		relstorage = stdRdOptions->columnstore ? RELSTORAGE_AOCOLS : RELSTORAGE_AOROWS;
 	else
 		relstorage = RELSTORAGE_HEAP;
-	
+
 	/* have to copy the actual tupdesc to get rid of any constraints */
 	tupdesc = CreateTupleDescCopy(queryDesc->tupDesc);
 
@@ -4837,7 +4850,7 @@ OpenIntoRel(QueryDesc *queryDesc)
 											  targetPolicy,  	/* MPP */
 											  reloptions,
 											  allowSystemTableModsDDL,
-											  /* valid_opts */false,
+											  /* valid_opts */ !validate_reloptions,
 						 					  &persistentTid,
 						 					  &persistentSerialNum);
 
@@ -5229,7 +5242,7 @@ get_part(EState *estate, Datum *values, bool *isnull, TupleDesc tupdesc)
 		estate->es_num_result_relations++;
 
 		resultRelation = heap_open(targetid, RowExclusiveLock);
-		initResultRelInfo(resultRelInfo,
+		InitResultRelInfo(resultRelInfo,
 						  resultRelation,
 						  1,
 						  CMD_INSERT,

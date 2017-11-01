@@ -18,6 +18,7 @@ WANTED_DIRS = \
 		indexscan \
 		dict_int \
 		dict_xsyn \
+		hstore		\
 		intarray \
 		pageinspect \
 		pg_upgrade \
@@ -41,6 +42,9 @@ ifeq ($(enable_orca),yes)
 WANTED_DIRS += orca_debug
 endif
 
+ifeq ($(enable_segwalrep),yes)
+WANTED_DIRS += gp_replica_check
+endif
 
 # Missing:
 #		start-scripts	\ (does not have a makefile)

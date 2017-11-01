@@ -11,15 +11,14 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/access/xlog_internal.h,v 1.22 2008/01/01 19:45:56 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/access/xlog_internal.h,v 1.23 2008/02/17 02:09:30 tgl Exp $
  */
 #ifndef XLOG_INTERNAL_H
 #define XLOG_INTERNAL_H
 
-#include <time.h>
-
 #include "access/xlog.h"
 #include "fmgr.h"
+#include "pgtime.h"
 #include "storage/block.h"
 #include "storage/relfilenode.h"
 #include "postmaster/primary_mirror_mode.h"
@@ -45,9 +44,12 @@ typedef struct BkpBlock
 	BlockNumber block;			/* block number */
 	uint16		hole_offset;	/* number of bytes before "hole" */
 	uint16		hole_length;	/* number of bytes in "hole" */
-
+	uint8       block_info;    /* flags, controls to apply the block or not for now */
 	/* ACTUAL BLOCK DATA FOLLOWS AT END OF STRUCT */
 } BkpBlock;
+
+/* Information stored in block_info */
+#define BLOCK_APPLY 0x01 /* page image should be restored during replay */
 
 typedef struct BkpBlockWithPT
 {
@@ -79,7 +81,7 @@ typedef struct XLogContRecord
 /*
  * Each page of XLOG file has a header like this:
  */
-#define XLOG_PAGE_MAGIC 0xD062	/* can be used as WAL version indicator */
+#define XLOG_PAGE_MAGIC 0xD063	/* can be used as WAL version indicator */
 
 typedef struct XLogPageHeaderData
 {
@@ -262,6 +264,10 @@ typedef XLogLongPageHeaderData *XLogLongPageHeader;
  * Method table for resource managers.
  *
  * RmgrTable[] is indexed by RmgrId values (see rmgr.h).
+ *
+ * rm_mask takes as input a page modified by the resource manager and masks
+ * out bits that shouldn't be flagged by wal_consistency_checking.
+ *
  */
 typedef struct RmgrData
 {
@@ -271,6 +277,7 @@ typedef struct RmgrData
 	void		(*rm_startup) (void);
 	void		(*rm_cleanup) (void);
 	bool		(*rm_safe_restartpoint) (void);
+	void		(*rm_mask) (char *pagedata, BlockNumber blkno);
 } RmgrData;
 
 extern const RmgrData RmgrTable[];
@@ -278,7 +285,7 @@ extern const RmgrData RmgrTable[];
 /*
  * Exported to support xlog switching from checkpointer
  */
-extern time_t GetLastSegSwitchTime(void);
+extern pg_time_t GetLastSegSwitchTime(void);
 extern XLogRecPtr RequestXLogSwitch(void);
 
 /*

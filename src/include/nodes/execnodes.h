@@ -5,6 +5,7 @@
  *
  *
  * Portions Copyright (c) 2005-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -834,6 +835,7 @@ typedef struct AggrefExprState
 {
 	ExprState	xprstate;
 	List	   *args;			/* states of argument expressions */
+	ExprState  *aggfilter;		/* FILTER expression */
 	List	   *inputTargets;	/* combined TargetList */
 	List	   *inputSortClauses; /* list of SortClause */
 	int			aggno;			/* ID number for agg within its plan node */
@@ -852,21 +854,20 @@ typedef struct GroupingFuncExprState
 } GroupingFuncExprState;
 
 /* ----------------
- *        WindowRefExprState node
+ *		WindowFuncExprState node
  * ----------------
  */
-typedef struct WindowRefExprState
+typedef struct WindowFuncExprState
 {
-	ExprState        xprstate;
+	ExprState	xprstate;
 	struct WindowState *windowstate; /* reflect parent window state */
-	List           *args;                        /* states of argument expressions */
-	bool           *argtypbyval;        /* pg_type.typbyval for each argument */
-	int16           *argtyplen;                /* pg_type.typlen of each argument */
-	int                        refno;                        /* index in window state's wrxstates list */
-	int                        funcno;                        /* index in window state's func_state array */
-	// bool                isAgg;                        /* aggregate-derived? */
-	char                winkind;                /* pg_window.winkind */
-} WindowRefExprState;
+	List	   *args;			/* states of argument expressions */
+	ExprState  *aggfilter;		/* FILTER expression */
+	bool	   *argtypbyval;	/* pg_type.typbyval for each argument */
+	int16	   *argtyplen;		/* pg_type.typlen of each argument */
+	int			funcno;			/* index in window state's func_state array */
+	char		winkind;		/* pg_window.winkind */
+} WindowFuncExprState;
 
 /* ----------------
  *		ArrayRefExprState node
@@ -1102,6 +1103,17 @@ typedef struct SubPlanState
 	FmgrInfo   *lhs_hash_funcs; /* hash functions for lefthand datatype(s) */
 	FmgrInfo   *cur_eq_funcs;	/* equality functions for LHS vs. table */
 } SubPlanState;
+
+/* ----------------
+ *		AlternativeSubPlanState node
+ * ----------------
+ */
+typedef struct AlternativeSubPlanState
+{
+	ExprState	xprstate;
+	List	   *subplans;		/* states of alternative subplans */
+	int			active;			/* list index of the one we're using */
+} AlternativeSubPlanState;
 
 /* ----------------
  *		FieldSelectState node
@@ -1418,7 +1430,6 @@ typedef struct Gpmon_NameVal_Text
 } Gpmon_NameVal_Text;
 
 /* Gpperfmon helper functions defined in execGpmon.c */
-extern char *GetScanRelNameGpmon(Oid relid, char schema_table_name[SCAN_REL_NAME_BUF_SIZE]);
 extern void CheckSendPlanStateGpmonPkt(PlanState *ps);
 extern void EndPlanStateGpmonPkt(PlanState *ps);
 extern void InitPlanNodeGpmonPkt(Plan* plan, gpmon_packet_t *gpmon_pkt, EState *estate);
@@ -1555,7 +1566,7 @@ typedef struct BitmapOrState
 } BitmapOrState;
 
 /* ----------------------------------------------------------------
- *	                  Scan State Information
+ *				 Scan State Information
  * ----------------------------------------------------------------
  */
 
@@ -2253,6 +2264,7 @@ typedef struct HashJoinState
 
 	/* set if the operator created workfiles */
 	bool workfiles_created;
+	bool reuse_hashtable; /* Do we need to preserve hash table to support rescan */
 } HashJoinState;
 
 
@@ -2271,8 +2283,7 @@ typedef struct HashJoinState
 typedef union GenericTupStore
 {
 	struct NTupleStore        *matstore;     /* Used by Materialize */
-	struct Tuplesortstate_mk  *sortstore_mk; /* Used by Sort when gp_enable_mk_sort = true */
-	struct Tuplesortstate     *sortstore;    /* Used by Sort when gp_enable_mk_sort = false */
+	void	   *sortstore;	/* Used by Sort */
 } GenericTupStore;
 
 /* ----------------
@@ -2430,9 +2441,9 @@ typedef struct AggState
 } AggState;
 
 
-/* ---------------------
- *        WindowState information
- * -------------------------
+/* ----------------
+ *	WindowState information
+ * ----------------
  */
 typedef struct WindowStatePerLevelData *WindowStatePerLevel;
 typedef struct WindowStatePerFunctionData *WindowStatePerFunction;
@@ -2441,7 +2452,7 @@ typedef struct WindowInputBufferData *WindowInputBuffer;
 typedef struct WindowState
 {
 	PlanState	ps;			/* its first field is NodeTag */
-	List	   *wrxstates;	/* all WindowRefExprState nodes in targetlist */
+	List	   *wfxstates;	/* all WindowFuncExprState nodes in targetlist */
 	FmgrInfo   *eqfunctions; /* equality fns for partition key */
 	TupleTableSlot *priorslot;	/* place for prior tuple */
 	TupleTableSlot *curslot;		/* current tuple */
@@ -2451,15 +2462,16 @@ typedef struct WindowState
 	bool		cur_slot_is_new;	/* is this a slot from a buffer or outer plan */
 	bool		cur_slot_part_break; /* slot breaks the partition key */
 	int			cur_slot_key_break; /* break level of the key in the slot */
-        
+
 	/* Array of working states per distinct window function */
 	int			numfuncs;
 	WindowStatePerFunction func_state;
-        
+
 	/* Per row state */
 	int64		row_index;
 
-	int			numlevels;
+	/* frame does not require buffering and complexity of invokeWindowFuncs() */
+	bool		trivial_frame;
 
 	WindowStatePerLevel level_state;
 

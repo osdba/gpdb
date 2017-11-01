@@ -3,8 +3,13 @@
  * nodeShareInputScan.c
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/executor/nodeShareInputScan.c
  *
  *-------------------------------------------------------------------------
  */
@@ -22,6 +27,7 @@
 
 #include "postgres.h"
 
+#include "access/xact.h"
 #include "cdb/cdbvars.h"
 #include "executor/executor.h"
 #include "executor/nodeShareInputScan.h"
@@ -30,7 +36,6 @@
 #include "utils/faultinjector.h"
 #include "utils/gp_alloc.h"
 #include "utils/tuplesort.h"
-#include "utils/tuplesort_mk.h"
 #include "utils/tuplestorenew.h"
 
 typedef struct ShareInput_Lk_Context
@@ -112,55 +117,30 @@ init_tuplestore_state(ShareInputScanState *node)
 		shareinput_create_bufname_prefix(rwfile_prefix, sizeof(rwfile_prefix), sisc->share_id);
 		node->ts_state = palloc0(sizeof(GenericTupStore));
 
-		if(gp_enable_mk_sort)
-		{
-			node->ts_state->sortstore_mk = tuplesort_begin_heap_file_readerwriter_mk(
-				&node->ss,
-				rwfile_prefix, false,
-				NULL,
-				0, NULL,
-				NULL, NULL,
-				PlanStateOperatorMemKB((PlanState *) node), true);
+		node->ts_state->sortstore = tuplesort_begin_heap_file_readerwriter(
+			&node->ss,
+			rwfile_prefix, false,
+			NULL,
+			0, NULL,
+			NULL, NULL,
+			PlanStateOperatorMemKB((PlanState *) node), true);
 
-			tuplesort_begin_pos_mk(node->ts_state->sortstore_mk, (TuplesortPos_mk **)(&node->ts_pos));
-			tuplesort_rescan_pos_mk(node->ts_state->sortstore_mk, (TuplesortPos_mk *)node->ts_pos);
-		}
-		else
-		{
-			node->ts_state->sortstore = tuplesort_begin_heap_file_readerwriter(
-				rwfile_prefix, false,
-				NULL,
-				0, NULL,
-				NULL, NULL,
-				PlanStateOperatorMemKB((PlanState *) node), true);
-
-			tuplesort_begin_pos(node->ts_state->sortstore, (TuplesortPos **)(&node->ts_pos));
-			tuplesort_rescan_pos(node->ts_state->sortstore, (TuplesortPos *)node->ts_pos);
-		}
+		tuplesort_begin_pos(node->ts_state->sortstore, (TuplesortPos **)(&node->ts_pos));
+		tuplesort_rescan_pos(node->ts_state->sortstore, (TuplesortPos *)node->ts_pos);
 	}
 	else 
 	{
 		Assert(sisc->share_type == SHARE_SORT);
 		Assert(snState != NULL);
 
-		if(gp_enable_mk_sort)
-		{
-			node->ts_state = ((SortState *)snState)->tuplesortstate;
-			Assert(NULL != node->ts_state->sortstore_mk);
-			tuplesort_begin_pos_mk(node->ts_state->sortstore_mk, (TuplesortPos_mk **)(&node->ts_pos));
-			tuplesort_rescan_pos_mk(node->ts_state->sortstore_mk, (TuplesortPos_mk *)node->ts_pos);
-		}
-		else
-		{
-			node->ts_state = ((SortState *)snState)->tuplesortstate;
-			Assert(NULL != node->ts_state->sortstore);
-			tuplesort_begin_pos(node->ts_state->sortstore, (TuplesortPos **)(&node->ts_pos));
-			tuplesort_rescan_pos(node->ts_state->sortstore, (TuplesortPos *)node->ts_pos);
-		}
+		node->ts_state = ((SortState *)snState)->tuplesortstate;
+		Assert(NULL != node->ts_state->sortstore);
+		tuplesort_begin_pos(node->ts_state->sortstore, (TuplesortPos **)(&node->ts_pos));
+		tuplesort_rescan_pos(node->ts_state->sortstore, (TuplesortPos *)node->ts_pos);
 	}
 
 	Assert(NULL != node->ts_state);
-	Assert(NULL != node->ts_state->matstore || NULL != node->ts_state->sortstore || NULL != node->ts_state->sortstore_mk);
+	Assert(NULL != node->ts_state->matstore || NULL != node->ts_state->sortstore);
 }
 
 
@@ -210,14 +190,7 @@ ShareInputNext(ShareInputScanState *node)
 		}
 		else
 		{
-			if(gp_enable_mk_sort)
-			{
-				gotOK = tuplesort_gettupleslot_pos_mk(node->ts_state->sortstore_mk, (TuplesortPos_mk *)node->ts_pos, forward, slot, CurrentMemoryContext);
-			}
-			else
-			{
-				gotOK = tuplesort_gettupleslot_pos(node->ts_state->sortstore, (TuplesortPos *)node->ts_pos, forward, slot, CurrentMemoryContext);
-			}
+			gotOK = tuplesort_gettupleslot_pos(node->ts_state->sortstore, (TuplesortPos *)node->ts_pos, forward, slot, CurrentMemoryContext);
 		}
 
 		if(!gotOK)
@@ -398,16 +371,8 @@ void ExecShareInputScanReScan(ShareInputScanState *node, ExprContext *exprCtxt)
 	}
 	else if (sisc->share_type == SHARE_SORT || sisc->share_type == SHARE_SORT_XSLICE)
 	{
-		if(gp_enable_mk_sort)
-		{
-			Assert(NULL != node->ts_state->sortstore_mk);
-			tuplesort_rescan_pos_mk(node->ts_state->sortstore_mk, (TuplesortPos_mk *) node->ts_pos);
-		}
-		else
-		{
-			Assert(NULL != node->ts_state->sortstore);
-			tuplesort_rescan_pos(node->ts_state->sortstore, (TuplesortPos *) node->ts_pos);
-		}
+		Assert(NULL != node->ts_state->sortstore);
+		tuplesort_rescan_pos(node->ts_state->sortstore, (TuplesortPos *) node->ts_pos);
 	}
 	else
 	{

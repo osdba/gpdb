@@ -321,11 +321,28 @@ select * from
 group by f1,f2,fs;
 
 --
+-- Test case for bug #5514 (mishandling of whole-row Vars in subselects)
+--
+
+create temp table table_a(id integer);
+insert into table_a values (42);
+
+create temp view view_a as select * from table_a;
+
+select view_a from view_a;
+select (select view_a) from view_a;
+select (select (select view_a)) from view_a;
+select (select (a.*)::text) from view_a a;
+
+--
 -- Check that whole-row Vars reading the result of a subselect don't include
 -- any junk columns therein
 --
 
-select q from (select max(f1) as max from int4_tbl group by f1 order by f1) q order by max;
+select q from (select max(f1) from int4_tbl group by f1 order by f1) q
+  order by max;
+with q as (select max(f1) from int4_tbl group by f1 order by f1)
+  select q from q;
 
 --
 -- Test case for sublinks pushed down into subselects via join alias expansion
@@ -359,3 +376,20 @@ select * from outer_7597 where (f1, f2) not in (select * from inner_7597);
 --
 
 select '1'::text in (select '1'::name union all select '1'::name);
+
+--
+-- Check sane behavior with nested IN SubLinks
+--
+select * from int4_tbl where
+  (case when f1 in (select unique1 from tenk1 a) then f1 else null end) in
+  (select ten from tenk1 b);
+
+--
+-- Check for incorrect optimization when IN subquery contains a SRF
+--
+set enable_hashjoin to 0;
+explain select * from int4_tbl o where (f1, f1) in
+  (select f1, generate_series(1,2) / 10 g from int4_tbl i group by f1);
+select * from int4_tbl o where (f1, f1) in
+  (select f1, generate_series(1,2) / 10 g from int4_tbl i group by f1);
+reset enable_hashjoin;

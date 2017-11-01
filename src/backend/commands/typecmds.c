@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/typecmds.c,v 1.113.2.1 2009/02/24 01:38:49 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/typecmds.c,v 1.117 2008/03/27 03:57:33 tgl Exp $
  *
  * DESCRIPTION
  *	  The "DefineFoo" routines take the parse tree and pick out the
@@ -47,6 +47,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_type_encoding.h"
+#include "catalog/pg_type_fn.h"
 #include "commands/defrem.h"
 #include "commands/tablecmds.h"
 #include "commands/typecmds.h"
@@ -66,6 +67,8 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
+
 #include "cdb/cdbvars.h"
 #include "cdb/cdbdisp_query.h"
 
@@ -543,7 +546,7 @@ DefineType(List *names, List *parameters)
 									DF_CANCEL_ON_ERROR|
 									DF_WITH_SNAPSHOT|
 									DF_NEED_TWO_PHASE,
-									GetAssignedOidsForDispatch(), /* FIXME */
+									GetAssignedOidsForDispatch(),
 									NULL);
 	}
 }
@@ -780,13 +783,13 @@ DefineDomain(CreateDomainStmt *stmt)
 	datum = SysCacheGetAttr(TYPEOID, typeTup,
 							Anum_pg_type_typdefault, &isnull);
 	if (!isnull)
-		defaultValue = DatumGetCString(DirectFunctionCall1(textout, datum));
+		defaultValue = TextDatumGetCString(datum);
 
 	/* Inherited default binary value */
 	datum = SysCacheGetAttr(TYPEOID, typeTup,
 							Anum_pg_type_typdefaultbin, &isnull);
 	if (!isnull)
-		defaultValueBin = DatumGetCString(DirectFunctionCall1(textout, datum));
+		defaultValueBin = TextDatumGetCString(datum);
 
 	/*
 	 * Run through constraints manually to avoid the additional processing
@@ -1632,12 +1635,10 @@ AlterDomainDefault(List *names, Node *defaultRaw)
 			/*
 			 * Form an updated tuple with the new default and write it back.
 			 */
-			new_record[Anum_pg_type_typdefaultbin - 1] = DirectFunctionCall1(textin,
-								 CStringGetDatum(nodeToString(defaultExpr)));
+			new_record[Anum_pg_type_typdefaultbin - 1] = CStringGetTextDatum(nodeToString(defaultExpr));
 
 			new_record_repl[Anum_pg_type_typdefaultbin - 1] = true;
-			new_record[Anum_pg_type_typdefault - 1] = DirectFunctionCall1(textin,
-											  CStringGetDatum(defaultValue));
+			new_record[Anum_pg_type_typdefault - 1] = CStringGetTextDatum(defaultValue);
 			new_record_repl[Anum_pg_type_typdefault - 1] = true;
 		}
 	}
@@ -2300,7 +2301,7 @@ domainAddConstraint(Oid domainOid, Oid domainNamespace, Oid baseTypeOid,
 		ereport(ERROR,
 				(errcode(ERRCODE_GROUPING_ERROR),
 			   errmsg("cannot use aggregate function in check constraint")));
-	if (pstate->p_hasWindFuncs)
+	if (pstate->p_hasWindowFuncs)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 			   errmsg("cannot use window function in check constraint")));
@@ -2433,9 +2434,7 @@ GetDomainConstraints(Oid typeOid)
 				elog(ERROR, "domain \"%s\" constraint \"%s\" has NULL conbin",
 					 NameStr(typTup->typname), NameStr(c->conname));
 
-			check_expr = (Expr *)
-				stringToNode(DatumGetCString(DirectFunctionCall1(textout,
-																 val)));
+			check_expr = (Expr *) stringToNode(TextDatumGetCString(val));
 
 			/* ExecInitExpr assumes we already fixed opfuncids */
 			fix_opfuncids((Node *) check_expr);
@@ -2478,6 +2477,76 @@ GetDomainConstraints(Oid typeOid)
 	}
 
 	return result;
+}
+
+
+/*
+ * Execute ALTER TYPE RENAME
+ */
+void
+RenameType(List *names, const char *newTypeName)
+{
+	TypeName   *typename;
+	Oid			typeOid;
+	Relation	rel;
+	HeapTuple	tup;
+	Form_pg_type typTup;
+
+	/* Make a TypeName so we can use standard type lookup machinery */
+	typename = makeTypeNameFromNameList(names);
+	typeOid = typenameTypeId(NULL, typename, NULL);
+
+	/* Look up the type in the type table */
+	rel = heap_open(TypeRelationId, RowExclusiveLock);
+
+	tup = SearchSysCacheCopy(TYPEOID,
+							 ObjectIdGetDatum(typeOid),
+							 0, 0, 0);
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type %u", typeOid);
+	typTup = (Form_pg_type) GETSTRUCT(tup);
+
+	/* check permissions on type */
+	if (!pg_type_ownercheck(typeOid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, ACL_KIND_TYPE,
+					   format_type_be(typeOid));
+
+	/*
+	 * If it's a composite type, we need to check that it really is a
+	 * free-standing composite type, and not a table's rowtype. We
+	 * want people to use ALTER TABLE not ALTER TYPE for that case.
+	 */
+	if (typTup->typtype == TYPTYPE_COMPOSITE &&
+		get_rel_relkind(typTup->typrelid) != RELKIND_COMPOSITE_TYPE)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("%s is a table's row type",
+						format_type_be(typeOid)),
+				 errhint("Use ALTER TABLE instead.")));
+
+	/* don't allow direct alteration of array types, either */
+	if (OidIsValid(typTup->typelem) &&
+		get_array_type(typTup->typelem) == typeOid)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot alter array type %s",
+						format_type_be(typeOid)),
+				 errhint("You can alter type %s, which will alter the array type as well.",
+						 format_type_be(typTup->typelem))));
+
+	/* 
+	 * If type is composite we need to rename associated pg_class entry too.
+	 * RenameRelationInternal will call RenameTypeInternal automatically.
+	 */
+	if (typTup->typtype == TYPTYPE_COMPOSITE)
+		RenameRelationInternal(typTup->typrelid, newTypeName,
+							   typTup->typnamespace);
+	else
+		RenameTypeInternal(typeOid, newTypeName,
+						   typTup->typnamespace);
+
+	/* Clean up */
+	heap_close(rel, RowExclusiveLock);
 }
 
 /*
@@ -2835,24 +2904,18 @@ AlterTypeNamespaceInternal(Oid typeOid, Oid nspOid,
 void
 AlterType(AlterTypeStmt *stmt)
 {
-	TypeName	   *typname = stmt->typeName;
-	Oid				typid;
-	int32			typmod;
-	HeapTuple		tup;
-	Datum			typoptions;
-	bool			typmod_set = false;
-	List		   *encoding = NIL;
-	Relation 		pgtypeenc;
+	TypeName   *typname;
+	Oid			typid;
+	HeapTuple	tup;
+	Datum		typoptions;
+	List	   *encoding;
+	Relation 	pgtypeenc;
 	ScanKeyData	scankey;
 	SysScanDesc scan;
 
 	/* Make a TypeName so we can use standard type lookup machinery */
-	typid = typenameTypeId(NULL, typname, &typmod);
-	if (!OidIsValid(typid))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("type \"%s\" does not exist",
-						TypeNameToString(typname))));
+	typname = makeTypeNameFromNameList(stmt->typeName);
+	typid = typenameTypeId(NULL, typname, NULL);
 
 	if (type_is_rowtype(typid))
 		ereport(ERROR,
@@ -2861,40 +2924,6 @@ AlterType(AlterTypeStmt *stmt)
 						TypeNameToString(typname)),
 				 errhint("The ENCODING clause cannot be used with row or "
 						 "composite types.")));
-
-	if (typid == BPCHAROID)
-	{
-		/* 
-		 * for character, the user specified character (N) if typmod is not
-		 * VARHDRSZ + 1.
-		 */
-		if (typmod != VARHDRSZ + 1)
-			typmod_set = true;
-	}
-	else if (typid == BITOID)
-	{
-		/*
-		 * For bit, we assume bit(1) in the parser. So only reject cases where
-		 * the typmod is not 1.
-		 */
-		if (typmod != 1)
-			typmod_set = true;
-	}
-	else if (typname->typmods || typname->typemod != -1)
-		typmod_set = true;
-
-	if (typmod_set)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("type precision cannot be specified when setting "
-						"DEFAULT ENCODING")));
-
-	if (typname->arrayBounds)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("type array bounds cannot be specified when setting "
-						"DEFAULT ENCODING")));
-
 
 	/* check permissions on type */
 	if (!pg_type_ownercheck(typid, GetUserId()))
@@ -2950,7 +2979,7 @@ AlterType(AlterTypeStmt *stmt)
 									DF_CANCEL_ON_ERROR|
 									DF_WITH_SNAPSHOT|
 									DF_NEED_TWO_PHASE,
-									NIL, /* FIXME */
+									NIL,
 									NULL);
 }
 

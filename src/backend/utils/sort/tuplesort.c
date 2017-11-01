@@ -88,17 +88,25 @@
  *
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/sort/tuplesort.c,v 1.92 2009/08/01 20:59:17 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/sort/tuplesort.c,v 1.83 2008/03/17 03:45:36 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
 
+#define COMPILING_TUPLESORT_C
+
+
 #include "postgres.h"
 
+#include <limits.h>
+
+#include "access/genam.h"
+#include "access/hash.h"
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "catalog/pg_amop.h"
@@ -120,7 +128,6 @@
 #include "executor/nodeSort.h"          /* Gpmon */
 #include "lib/stringinfo.h"             /* StringInfo */
 #include "utils/dynahash.h"             /* my_log2 */
-#include "utils/tuplesort_gp.h"
 
 /* GUC variables */
 #ifdef TRACE_SORT
@@ -224,6 +231,9 @@ struct TuplesortPos
  */
 struct Tuplesortstate
 {
+	/* MUST BE FIRST, to match switcheroo_Tuplesortstate */
+	bool		is_mk_tuplesortstate;
+
 	TupSortStatus status;		/* enumerated value as shown above */
 	int			nKeys;			/* number of columns in sort key */
 	bool		randomAccess;	/* did caller request random access? */
@@ -372,11 +382,17 @@ struct Tuplesortstate
 	MemTupleBinding *mt_bind;
 	/*
 	 * These variables are specific to the IndexTuple case; they are set by
-	 * tuplesort_begin_index and used only by the IndexTuple routines.
+	 * tuplesort_begin_index_xxx and used only by the IndexTuple routines.
 	 */
-	Relation	indexRel;
+	Relation	indexRel;		/* index being built */
+
+	/* These are specific to the index_btree subcase: */
 	ScanKey		indexScanKey;
 	bool		enforceUnique;	/* complain if we find duplicate tuples */
+
+	/* These are specific to the index_hash subcase: */
+	FmgrInfo   *hash_proc;		/* call info for the hash function */
+	uint32		hash_mask;		/* mask for sortable part of hash code */
 
 	/*
 	 * These variables are specific to the Datum case; they are set by
@@ -498,13 +514,16 @@ static void writetup_heap(Tuplesortstate *state, LogicalTape *lt, SortTuple *stu
 static void readtup_heap(Tuplesortstate *state, TuplesortPos *pos, SortTuple *stup,
 			 LogicalTape *lt, unsigned int len);
 static void reversedirection_heap(Tuplesortstate *state);
-static int comparetup_index(const SortTuple *a, const SortTuple *b,
+static int comparetup_index_btree(const SortTuple *a, const SortTuple *b,
+				 Tuplesortstate *state);
+static int comparetup_index_hash(const SortTuple *a, const SortTuple *b,
 				 Tuplesortstate *state);
 static void copytup_index(Tuplesortstate *state, SortTuple *stup, void *tup);
 static void writetup_index(Tuplesortstate *state, LogicalTape *lt, SortTuple *stup);
 static void readtup_index(Tuplesortstate *state, TuplesortPos *pos, SortTuple *stup,
 			  LogicalTape *lt, unsigned int len);
-static void reversedirection_index(Tuplesortstate *state);
+static void reversedirection_index_btree(Tuplesortstate *state);
+static void reversedirection_index_hash(Tuplesortstate *state);
 static int comparetup_datum(const SortTuple *a, const SortTuple *b,
 				 Tuplesortstate *state);
 static void copytup_datum(Tuplesortstate *state, SortTuple *stup, void *tup);
@@ -619,7 +638,7 @@ tuplesort_begin_common(int workMem, bool randomAccess, bool allocmemtuple)
 }
 
 Tuplesortstate *
-tuplesort_begin_heap(TupleDesc tupDesc,
+tuplesort_begin_heap(ScanState *ss, TupleDesc tupDesc,
 					 int nkeys, AttrNumber *attNums,
 					 Oid *sortOperators, bool *nullsFirstFlags,
 					 int workMem, bool randomAccess)
@@ -686,9 +705,9 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 }
 
 Tuplesortstate *
-tuplesort_begin_index(Relation indexRel,
-					  bool enforceUnique,
-					  int workMem, bool randomAccess)
+tuplesort_begin_index_btree(Relation indexRel,
+							bool enforceUnique,
+							int workMem, bool randomAccess)
 {
 	Tuplesortstate *state = tuplesort_begin_common(workMem, randomAccess, true);
 	MemoryContext oldcontext;
@@ -703,14 +722,13 @@ tuplesort_begin_index(Relation indexRel,
 
 	state->nKeys = RelationGetNumberOfAttributes(indexRel);
 
-	state->comparetup = comparetup_index;
+	state->comparetup = comparetup_index_btree;
 	state->copytup = copytup_index;
 	state->writetup = writetup_index;
 	state->readtup = readtup_index;
-	state->reversedirection = reversedirection_index;
+	state->reversedirection = reversedirection_index_btree;
 
 	state->indexRel = indexRel;
-	/* see comments below about btree dependence of this code... */
 	state->indexScanKey = _bt_mkscankey_nodata(indexRel);
 	state->enforceUnique = enforceUnique;
 
@@ -720,7 +738,49 @@ tuplesort_begin_index(Relation indexRel,
 }
 
 Tuplesortstate *
-tuplesort_begin_datum(Oid datumType,
+tuplesort_begin_index_hash(Relation indexRel,
+						   uint32 hash_mask,
+						   int workMem, bool randomAccess)
+{
+	Tuplesortstate *state = tuplesort_begin_common(workMem, randomAccess, true);
+	MemoryContext oldcontext;
+
+	oldcontext = MemoryContextSwitchTo(state->sortcontext);
+
+#ifdef TRACE_SORT
+	if (trace_sort)
+		elog(LOG,
+			 "begin index sort: hash_mask = 0x%x, workMem = %d, randomAccess = %c",
+			 hash_mask,
+			 workMem, randomAccess ? 't' : 'f');
+#endif
+
+	state->nKeys = 1;			/* Only one sort column, the hash code */
+
+	state->comparetup = comparetup_index_hash;
+	state->copytup = copytup_index;
+	state->writetup = writetup_index;
+	state->readtup = readtup_index;
+	state->reversedirection = reversedirection_index_hash;
+
+	state->indexRel = indexRel;
+
+	/*
+	 * We look up the index column's hash function just once, to avoid
+	 * chewing lots of cycles in repeated index_getprocinfo calls.  This
+	 * assumes that our caller holds the index relation open throughout the
+	 * sort, else the pointer obtained here might cease to be valid.
+	 */
+	state->hash_proc = index_getprocinfo(indexRel, 1, HASHPROC);
+	state->hash_mask = hash_mask;
+
+	MemoryContextSwitchTo(oldcontext);
+
+	return state;
+}
+
+Tuplesortstate *
+tuplesort_begin_datum(ScanState *ss, Oid datumType,
 					  Oid sortOperator, bool nullsFirstFlag,
 					  int workMem, bool randomAccess)
 {
@@ -977,7 +1037,7 @@ tuplesort_putdatum(Tuplesortstate *state, Datum val, bool isNull)
 	{
 		stup.datum1 = datumCopy(val, false, state->datumTypeLen);
 		stup.isnull1 = false;
-		stup.tuple = DatumGetPointer(stup.datum1);
+		stup.tuple = (MemTuple) DatumGetPointer(stup.datum1);
 		USEMEM(state, GetMemoryChunkSpace(DatumGetPointer(stup.datum1))); 
 	}
 
@@ -2904,14 +2964,14 @@ reversedirection_heap(Tuplesortstate *state)
 /*
  * Routines specialized for IndexTuple case
  *
- * NOTE: actually, these are specialized for the btree case; it's not
- * clear whether you could use them for a non-btree index.	Possibly
- * you'd need to make another set of routines if you needed to sort
- * according to another kind of index.
+ * The btree and hash cases require separate comparison functions, but the
+ * IndexTuple representation is the same so the copy/write/read support
+ * functions can be shared.
  */
 
 static int
-comparetup_index(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
+comparetup_index_btree(const SortTuple *a, const SortTuple *b,
+					   Tuplesortstate *state)
 {
 	/*
 	 * This is similar to _bt_tuplecompare(), but we have already done the
@@ -3023,6 +3083,63 @@ comparetup_index(const SortTuple *a, const SortTuple *b, Tuplesortstate *state)
 	return 0;
 }
 
+static int
+comparetup_index_hash(const SortTuple *a, const SortTuple *b,
+					  Tuplesortstate *state)
+{
+	/*
+	 * It's slightly annoying to redo the hash function each time, although
+	 * most hash functions ought to be cheap.  Is it worth having a variant
+	 * tuple storage format so we can store the hash code?
+	 */
+	uint32		hash1;
+	uint32		hash2;
+	IndexTuple	tuple1;
+	IndexTuple	tuple2;
+
+	/* Allow interrupting long sorts */
+	CHECK_FOR_INTERRUPTS();
+
+	/* Compute hash codes and mask off bits we don't want to sort by */
+	Assert(!a->isnull1);
+	hash1 = DatumGetUInt32(FunctionCall1(state->hash_proc, a->datum1))
+		& state->hash_mask;
+	Assert(!b->isnull1);
+	hash2 = DatumGetUInt32(FunctionCall1(state->hash_proc, b->datum1))
+		& state->hash_mask;
+
+	if (hash1 > hash2)
+		return 1;
+	else if (hash1 < hash2)
+		return -1;
+
+	/*
+	 * If hash values are equal, we sort on ItemPointer.  This does not affect
+	 * validity of the finished index, but it offers cheap insurance against
+	 * performance problems with bad qsort implementations that have trouble
+	 * with large numbers of equal keys.
+	 */
+	tuple1 = (IndexTuple) a->tuple;
+	tuple2 = (IndexTuple) b->tuple;
+
+	{
+		BlockNumber blk1 = ItemPointerGetBlockNumber(&tuple1->t_tid);
+		BlockNumber blk2 = ItemPointerGetBlockNumber(&tuple2->t_tid);
+
+		if (blk1 != blk2)
+			return (blk1 < blk2) ? -1 : 1;
+	}
+	{
+		OffsetNumber pos1 = ItemPointerGetOffsetNumber(&tuple1->t_tid);
+		OffsetNumber pos2 = ItemPointerGetOffsetNumber(&tuple2->t_tid);
+
+		if (pos1 != pos2)
+			return (pos1 < pos2) ? -1 : 1;
+	}
+
+	return 0;
+}
+
 static void
 copytup_index(Tuplesortstate *state, SortTuple *stup, void *tup)
 {
@@ -3096,7 +3213,7 @@ readtup_index(Tuplesortstate *state, TuplesortPos *pos, SortTuple *stup,
 }
 
 static void
-reversedirection_index(Tuplesortstate *state)
+reversedirection_index_btree(Tuplesortstate *state)
 {
 	ScanKey		scanKey = state->indexScanKey;
 	int			nkey;
@@ -3105,6 +3222,13 @@ reversedirection_index(Tuplesortstate *state)
 	{
 		scanKey->sk_flags ^= (SK_BT_DESC | SK_BT_NULLS_FIRST);
 	}
+}
+
+static void
+reversedirection_index_hash(Tuplesortstate *state)
+{
+	/* We don't support reversing direction in a hash index sort */
+	elog(ERROR, "reversedirection_index_hash is not implemented");
 }
 
 
@@ -3288,7 +3412,7 @@ tuplesort_begin_pos(Tuplesortstate *st, TuplesortPos **pos)
 
 
 Tuplesortstate *
-tuplesort_begin_heap_file_readerwriter(
+tuplesort_begin_heap_file_readerwriter(ScanState *ss,
 		const char *rwfile_prefix, bool isWriter,
 		TupleDesc tupDesc,
 		int nkeys, AttrNumber *attNums,
@@ -3315,7 +3439,7 @@ tuplesort_begin_heap_file_readerwriter(
 		 * Writer is a oridinary tuplesort, except the underlying buf file are named by
 		 * rwfile_prefix.
 		 */
-		state = tuplesort_begin_heap(tupDesc, nkeys, attNums,
+		state = tuplesort_begin_heap(NULL, tupDesc, nkeys, attNums,
 									 sortOperators, nullsFirstFlags,
 									 workMem, randomAccess);
 

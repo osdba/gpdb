@@ -5,12 +5,13 @@
  *	  given relation, and create Paths accordingly.
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/path/indxpath.c,v 1.227.2.2 2009/04/16 20:42:28 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/path/indxpath.c,v 1.234 2008/11/22 22:47:05 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -1738,7 +1739,7 @@ best_inner_indexscan(PlannerInfo *root, RelOptInfo *rel,
 	*cheapest_startup = *cheapest_total = NULL;
 
 	/*
-	 * Nestloop only supports inner and left joins.
+	 * Nestloop only supports inner, left, semi, and anti joins.
 	 */
 	switch (jointype)
 	{
@@ -1746,6 +1747,7 @@ best_inner_indexscan(PlannerInfo *root, RelOptInfo *rel,
 			isouterjoin = false;
 			break;
 		case JOIN_LEFT:
+		case JOIN_ANTI:
 			isouterjoin = true;
 			break;
 		default:
@@ -2819,8 +2821,7 @@ prefix_quals(Node *leftop, Oid opfamily,
 		switch (prefix_const->consttype)
 		{
 			case TEXTOID:
-				prefix = DatumGetCString(DirectFunctionCall1(textout,
-												  prefix_const->constvalue));
+				prefix = TextDatumGetCString(prefix_const->constvalue);
 				break;
 			case BYTEAOID:
 				prefix = DatumGetCString(DirectFunctionCall1(byteaout,
@@ -2974,15 +2975,15 @@ static Datum
 string_to_datum(const char *str, Oid datatype)
 {
 	/*
-	 * We cheat a little by assuming that textin() will do for bpchar and
-	 * varchar constants too...
+	 * We cheat a little by assuming that CStringGetTextDatum() will do for
+	 * bpchar and varchar constants too...
 	 */
 	if (datatype == NAMEOID)
 		return DirectFunctionCall1(namein, CStringGetDatum(str));
 	else if (datatype == BYTEAOID)
 		return DirectFunctionCall1(byteain, CStringGetDatum(str));
 	else
-		return DirectFunctionCall1(textin, CStringGetDatum(str));
+		return CStringGetTextDatum(str);
 }
 
 /*

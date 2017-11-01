@@ -8,12 +8,13 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/parser/parse_cte.c,v 2.1 2008/10/04 21:56:54 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/parser/parse_cte.c,v 2.2 2008/10/05 22:50:55 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
 #include "parser/parse_cte.h"
@@ -33,7 +34,7 @@ typedef enum
 } RecursionContext;
 
 /* Associated error messages --- each must have one %s for CTE name */
-static const char * const recursion_errormsgs[] = {
+static const char *const recursion_errormsgs[] = {
 	/* RECURSION_OK */
 	NULL,
 	/* RECURSION_NONRECURSIVETERM */
@@ -91,6 +92,8 @@ static void checkWellFormedRecursion(CteState *cstate);
 static bool checkWellFormedRecursionWalker(Node *node, CteState *cstate);
 static void checkWellFormedSelectStmt(SelectStmt *stmt, CteState *cstate);
 
+static void checkSelfRefInRangeSubSelect(SelectStmt *stmt, CteState *cstate);
+static void checkWindowFuncInRecursiveTerm(SelectStmt *stmt, CteState *cstate);
 
 /*
  * transformWithClause -
@@ -105,14 +108,6 @@ List *
 transformWithClause(ParseState *pstate, WithClause *withClause)
 {
 	ListCell   *lc;
-
-	/* FIXME: Remove this when we support recursive CTE*/
-	if (withClause->recursive)
-	{
-		ereport(ERROR, 
-				(errcode(ERRCODE_GP_FEATURE_NOT_SUPPORTED),
-				 errmsg("RECURSIVE option in WITH clause is not supported")));
-	}
 
 	/* Only one WITH clause per query level */
 	Assert(pstate->p_ctenamespace == NIL);
@@ -234,6 +229,7 @@ transformWithClause(ParseState *pstate, WithClause *withClause)
 		foreach (lc, withClause->ctes)
 		{
 			CommonTableExpr *cte = (CommonTableExpr *)lfirst(lc);
+
 			analyzeCTE(pstate, cte);
 			pstate->p_ctenamespace = lappend(pstate->p_ctenamespace, cte);
 			pstate->p_future_ctes = list_delete_first(pstate->p_future_ctes);
@@ -392,6 +388,8 @@ analyzeCTETargetList(ParseState *pstate, CommonTableExpr *cte, List *tlist)
 	foreach(tlistitem, tlist)
 	{
 		TargetEntry *te = (TargetEntry *) lfirst(tlistitem);
+		Oid			coltype;
+		int32		coltypmod;
 
 		if (te->resjunk)
 			continue;
@@ -404,10 +402,23 @@ analyzeCTETargetList(ParseState *pstate, CommonTableExpr *cte, List *tlist)
 			attrname = pstrdup(te->resname);
 			cte->ctecolnames = lappend(cte->ctecolnames, makeString(attrname));
 		}
-		cte->ctecoltypes = lappend_oid(cte->ctecoltypes,
-									   exprType((Node *) te->expr));
-		cte->ctecoltypmods = lappend_int(cte->ctecoltypmods,
-										 exprTypmod((Node *) te->expr));
+		coltype = exprType((Node *) te->expr);
+		coltypmod = exprTypmod((Node *) te->expr);
+		/*
+		 * If the CTE is recursive, force the exposed column type of any
+		 * "unknown" column to "text".  This corresponds to the fact that
+		 * SELECT 'foo' UNION SELECT 'bar' will ultimately produce text.
+		 * We might see "unknown" as a result of an untyped literal in
+		 * the non-recursive term's select list, and if we don't convert
+		 * to text then we'll have a mismatch against the UNION result.
+		 */
+		if (cte->cterecursive && coltype == UNKNOWNOID)
+		{
+			coltype = TEXTOID;
+			coltypmod = -1;		/* should be -1 already, but be sure */
+		}
+		cte->ctecoltypes = lappend_oid(cte->ctecoltypes, coltype);
+		cte->ctecoltypmods = lappend_int(cte->ctecoltypmods, coltypmod);
 	}
 	if (varattno < numaliases)
 		ereport(ERROR,
@@ -666,6 +677,18 @@ checkWellFormedRecursion(CteState *cstate)
 		if (cstate->selfrefcount != 1)			/* shouldn't happen */
 			elog(ERROR, "missing recursive reference");
 
+		/* WITH mustn't contain self-reference, either */
+		if (stmt->withClause)
+		{
+			cstate->curitem = i;
+			cstate->innerwiths = NIL;
+			cstate->selfrefcount = 0;
+			cstate->context = RECURSION_SUBLINK;
+			checkWellFormedRecursionWalker((Node *) stmt->withClause->ctes,
+										   cstate);
+			Assert(cstate->innerwiths == NIL);
+		}
+
 		/*
 		 * Disallow ORDER BY and similar decoration atop the UNION ALL.
 		 * These don't make sense because it's impossible to figure out what
@@ -769,6 +792,7 @@ checkWellFormedRecursionWalker(Node *node, CteState *cstate)
 		SelectStmt *stmt = (SelectStmt *) node;
 		ListCell *lc;
 
+
 		if (stmt->withClause)
 		{
 			if (stmt->withClause->recursive)
@@ -811,7 +835,28 @@ checkWellFormedRecursionWalker(Node *node, CteState *cstate)
 			}
 		}
 		else
-				checkWellFormedSelectStmt(stmt, cstate);
+			checkWellFormedSelectStmt(stmt, cstate);
+
+		if (cstate->context == RECURSION_OK)
+		{
+			if (stmt->distinctClause)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("DISTINCT in a recursive query is not implemented"),
+						 parser_errposition(cstate->pstate,
+											exprLocation((Node *) stmt->distinctClause))));
+			if (stmt->groupClause)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("GROUP BY in a recursive query is not implemented"),
+						 parser_errposition(cstate->pstate,
+											exprLocation((Node *) stmt->groupClause))));
+
+			checkWindowFuncInRecursiveTerm(stmt, cstate);
+		}
+
+		checkSelfRefInRangeSubSelect(stmt, cstate);
+
 		/* We're done examining the SelectStmt */
 		return false;
 	}
@@ -877,6 +922,19 @@ checkWellFormedRecursionWalker(Node *node, CteState *cstate)
 		checkWellFormedRecursionWalker(sl->subselect, cstate);
 		cstate->context = save_context;
 		checkWellFormedRecursionWalker(sl->testexpr, cstate);
+		return false;
+	}
+	if (IsA(node, RangeSubselect))
+	{
+		RangeSubselect *rs = (RangeSubselect *) node;
+
+		/*
+		 * we intentionally override outer context, since subquery is
+		 * independent
+		 */
+		cstate->context = RECURSION_SUBLINK;
+		checkWellFormedRecursionWalker(rs->subquery, cstate);
+		cstate->context = save_context;
 		return false;
 	}
 	return raw_expression_tree_walker(node,
@@ -952,3 +1010,56 @@ checkWellFormedSelectStmt(SelectStmt *stmt, CteState *cstate)
 		}
 	}
 }
+
+/*
+ * Check if a recursive cte is referred to in a RangeSubSelect's SelectStmt.
+ * This is currently not supported and is checked for in the parsing stage
+ */
+static void
+checkSelfRefInRangeSubSelect(SelectStmt *stmt, CteState *cstate)
+{
+	ListCell *lc;
+	RecursionContext cxt = cstate->context;
+
+	foreach(lc, stmt->fromClause)
+	{
+		if (IsA((Node *) lfirst(lc), RangeSubselect))
+		{
+			cstate->context = RECURSION_SUBLINK;
+			RangeSubselect *rs = (RangeSubselect *) lfirst(lc);
+			SelectStmt *subquery = (SelectStmt *) rs->subquery;
+			checkWellFormedSelectStmt(subquery, cstate);
+		}
+	}
+	cstate->context = cxt;
+}
+
+/*
+ * Check if the recursive term of a recursive cte contains a window function.
+ * This is currently not supported and is checked for in the parsting stage
+ */
+static void
+checkWindowFuncInRecursiveTerm(SelectStmt *stmt, CteState *cstate)
+{
+	ListCell *lc;
+	foreach(lc, stmt->targetList)
+	{
+		if (IsA((Node *) lfirst(lc), ResTarget))
+		{
+			ResTarget *rt = (ResTarget *) lfirst(lc);
+			if (IsA(rt->val, FuncCall))
+			{
+				FuncCall *fc = (FuncCall *) rt->val;
+				if (fc->over != NULL)
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("Window Functions in a recursive query is not implemented"),
+							 parser_errposition(cstate->pstate,
+												exprLocation((Node *) fc))));
+				}
+			}
+		}
+	}
+}
+

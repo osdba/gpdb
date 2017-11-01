@@ -4,7 +4,12 @@
  *	  prototypes for nodeWindow.c
  *
  *
- * Copyright (c) 2007-2008, Greenplum inc *
+ * Portions Copyright (c) 2007-2008, Greenplum inc *
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/include/executor/nodeWindow.h
  *
  *-------------------------------------------------------------------------
  */
@@ -13,8 +18,8 @@
 
 #include "nodes/execnodes.h"
 
-extern int	ExecCountSlotsWindow(Window *node);
-extern WindowState *ExecInitWindow(Window *node, EState *estate, int eflags);
+extern int	ExecCountSlotsWindow(WindowAgg *node);
+extern WindowState *ExecInitWindow(WindowAgg *node, EState *estate, int eflags);
 extern TupleTableSlot *ExecWindow(WindowState *node);
 extern void ExecEndWindow(WindowState *node);
 extern void ExecReScanWindow(WindowState *node, ExprContext *exprCtxt);
@@ -42,7 +47,6 @@ extern Datum lead_generic(PG_FUNCTION_ARGS);
 extern Datum last_value_generic(PG_FUNCTION_ARGS);
 extern Datum first_value_generic(PG_FUNCTION_ARGS);
 extern Datum lag_generic(PG_FUNCTION_ARGS);
-extern Datum lead_lag_frame_maker(PG_FUNCTION_ARGS);
 
 static inline gpmon_packet_t * GpmonPktFromWindowState(WindowState *node)
 {

@@ -4,10 +4,14 @@
  *	  POSTGRES internals code for resource queues and locks.
  *
  *
- * Copyright (c) 2006-2008, Greenplum inc.
+ * Portions Copyright (c) 2006-2008, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
+ *
+ * IDENTIFICATION
+ *	    src/backend/utils/resscheduler/resqueue.c
  *
  *-------------------------------------------------------------------------
  */
@@ -1446,7 +1450,6 @@ ResIncrementAdd(ResPortalIncrement *incSet, PROCLOCK *proclock, ResourceOwner ow
 	{
 		incrementSet->pid = incSet->pid;
 		incrementSet->portalId = incSet->portalId;
-		incrementSet->owner = owner;
 		incrementSet->isHold = incSet->isHold;
 		incrementSet->isCommitted = false;
 		for (i = 0; i < NUM_RES_LIMIT_TYPES; i++)

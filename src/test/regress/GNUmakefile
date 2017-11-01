@@ -6,7 +6,7 @@
 # Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
-# $PostgreSQL: pgsql/src/test/regress/GNUmakefile,v 1.71 2008/01/01 19:46:00 momjian Exp $
+# $PostgreSQL: pgsql/src/test/regress/GNUmakefile,v 1.73 2008/04/07 14:15:58 petere Exp $
 #
 #-------------------------------------------------------------------------
 
@@ -87,6 +87,7 @@ install: all installdirs
 	$(INSTALL_PROGRAM) atmsort.pm '$(DESTDIR)$(pgxsdir)/$(subdir)/atmsort.pm'
 	$(INSTALL_PROGRAM) explain.pl '$(DESTDIR)$(pgxsdir)/$(subdir)/explain.pl'
 	$(INSTALL_PROGRAM) explain.pm '$(DESTDIR)$(pgxsdir)/$(subdir)/explain.pm'
+	$(INSTALL_PROGRAM) GPTest.pm '$(DESTDIR)$(pgxsdir)/$(subdir)/GPTest.pm'
 
 uninstall:
 	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/pg_regress$(X)'
@@ -96,12 +97,15 @@ uninstall:
 	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/atmsort.pm'
 	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/explain.pl'
 	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/explain.pm'
+	rm -f '$(DESTDIR)$(pgxsdir)/$(subdir)/GPTest.pm'
 
 
 # Build dynamically-loaded object file for CREATE FUNCTION ... LANGUAGE C.
 
 NAME = regress
-OBJS = regress.o partindex.o workfile_mgr_test.o
+OBJS = regress.o
+
+OBJS += regress_gp.o partindex.o workfile_mgr_test.o
 
 include $(top_srcdir)/src/Makefile.shlib
 
@@ -141,7 +145,7 @@ endif
 
 # And finally some extra C modules...
 
-all: all-spi tablespace-setup includecheck
+all: all-spi tablespace-setup includecheck hooktest
 
 .PHONY: all-spi
 all-spi:
@@ -150,7 +154,7 @@ all-spi:
 # Tablespace setup
 .PHONY: tablespace-setup
 tablespace-setup:
-	-rm -rf ./testtablespace
+	rm -rf ./testtablespace
 	mkdir ./testtablespace
 
 # Check for include files that are not being shipped
@@ -158,11 +162,22 @@ tablespace-setup:
 includecheck:
 	$(srcdir)/checkinc.py
 
+.PHONY: hooktest
+hooktest:
+	$(MAKE) -C $< $@
+
 ##
 ## Run tests
 ##
 
 pg_regress_call = ./pg_regress --inputdir=$(srcdir) --multibyte=$(MULTIBYTE) $(MAXCONNOPT) $(NOLOCALE) --init-file=$(srcdir)/init_file
+
+# These are currently skipped because they don't work yet for segment wal replication
+# segspace: cannot restart database at the moment
+# filespace: segment wal replication does not handle filespaces yet
+ifeq ($(enable_segwalrep), yes)
+pg_regress_call := $(pg_regress_call) --exclude-tests="segspace_setup segspace segspace_cleanup filespace"
+endif
 
 check: all
 	$(pg_regress_call) --temp-install=./tmp_check --top-builddir=$(top_builddir) --srcdir=$(abs_srcdir) --temp-port=$(TEMP_PORT) --schedule=$(srcdir)/parallel_schedule 
@@ -170,7 +185,7 @@ check: all
 installcheck: all
 	$(pg_regress_call)  --psqldir=$(PSQLDIR) --schedule=$(srcdir)/serial_schedule --srcdir=$(abs_srcdir)
 
-installcheck-good: all twophase_pqexecparams
+installcheck-good: all twophase_pqexecparams hooktest
 	if [ -z "$(INSTALLCHECK_GOOD_KERBEROS)" ]; then \
 	$(pg_regress_call)  --psqldir=$(PSQLDIR) --schedule=$(srcdir)/parallel_schedule --schedule=$(srcdir)/greenplum_schedule --srcdir=$(abs_srcdir) --ao-dir=uao; \
 	else \
@@ -204,8 +219,9 @@ bkuprestore: all
 
 clean distclean maintainer-clean: clean-lib
 # things built by `all' target
-	rm -f $(NAME)$(DLSUFFIX) $(OBJS)
+	rm -f $(OBJS)
 	$(MAKE) -C $(contribdir)/spi clean
+	$(MAKE) -C hooktest/ clean
 	rm -f $(output_files) $(input_files) pg_regress_main.o pg_regress.o pg_regress$(X) twophase_pqexecparams
 # things created by dynamic configs
 	find sql -type l | xargs rm -f

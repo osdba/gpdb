@@ -4,7 +4,8 @@
  *	  POSTGRES resource scheduler definitions.
  *
  *
- * Copyright (c) 2006-2008, Greenplum inc.
+ * Portions Copyright (c) 2006-2008, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -25,6 +26,7 @@
 /*
  * GUC variables.
  */
+extern ResManagerMemoryPolicy   gp_resgroup_memory_policy;
 extern ResManagerMemoryPolicy   gp_resqueue_memory_policy;
 extern char                		*gp_resqueue_memory_policy_str;
 extern bool						gp_log_resqueue_memory;
@@ -93,7 +95,6 @@ typedef struct ResPortalIncrement
 {
 	int			pid;					/* Process this increment is for. */
 	uint32		portalId;				/* Portal Id */
-	ResourceOwner	owner;				/* Resource Owner. */
 	bool		isHold;					/* Holdable cursor? */
 	bool		isCommitted;			/* 1st commit complete? */
 	SHM_QUEUE	portalLink;				/* List link in PROCLOCKS list 

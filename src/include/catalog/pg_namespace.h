@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/catalog/pg_namespace.h,v 1.23 2008/01/01 19:45:56 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/catalog/pg_namespace.h,v 1.24 2008/03/27 03:57:34 tgl Exp $
  *
  * NOTES
  *	  the genbki.sh script reads this file and generates .bki
@@ -31,19 +31,13 @@
  *	nspacl				access privilege list
  * ----------------------------------------------------------------
  */
-
-/* ----------------
- *		pg_namespace definition.  cpp turns this into
- *		typedef struct FormData_pg_namespace
- * ----------------
- */
-#define NamespaceRelationId	2615
+#define NamespaceRelationId  2615
 
 CATALOG(pg_namespace,2615)
 {
-	NameData	nspname;	
-	Oid			nspowner;	
-	aclitem		nspacl[1];	/* VARIABLE LENGTH FIELD */
+	NameData	nspname;
+	Oid			nspowner;
+	aclitem		nspacl[1];		/* VARIABLE LENGTH FIELD */
 } FormData_pg_namespace;
 
 /* GPDB added foreign key definitions for gpcheckcat. */
@@ -56,15 +50,16 @@ FOREIGN_KEY(nspowner REFERENCES pg_authid(oid));
  */
 typedef FormData_pg_namespace *Form_pg_namespace;
 
-
 /* ----------------
  *		compiler constants for pg_namespace
  * ----------------
  */
-#define Natts_pg_namespace			3
-#define Anum_pg_namespace_nspname	1
-#define Anum_pg_namespace_nspowner	2
-#define Anum_pg_namespace_nspacl	3
+
+#define Natts_pg_namespace				3
+#define Anum_pg_namespace_nspname		1
+#define Anum_pg_namespace_nspowner		2
+#define Anum_pg_namespace_nspacl		3
+
 
 /* ----------------
  * initial contents of pg_namespace
@@ -98,6 +93,6 @@ DESCR("Reserved schema for Append Only segment list and eof tables");
 /*
  * prototypes for functions in pg_namespace.c
  */
-extern Oid NamespaceCreate(const char *nspName, Oid ownerId);
+extern Oid	NamespaceCreate(const char *nspName, Oid ownerId);
 
 #endif   /* PG_NAMESPACE_H */

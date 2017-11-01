@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/alter.c,v 1.27 2008/02/07 21:07:55 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/alter.c,v 1.28 2008/03/19 18:38:30 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -102,43 +102,49 @@ ExecRenameStmt(RenameStmt *stmt)
 		case OBJECT_SEQUENCE:
 		case OBJECT_VIEW:
 		case OBJECT_INDEX:
-		{
-			if (Gp_role == GP_ROLE_DISPATCH)
-			{
-				CheckRelationOwnership(stmt->relation, true);
-				stmt->objid = RangeVarGetRelid(stmt->relation, false);
-			}
-
-			/*
-			 * RENAME TABLE requires that we (still) hold
-			 * CREATE rights on the containing namespace, as
-			 * well as ownership of the table.
-			 */
-			Oid			namespaceId = get_rel_namespace(stmt->objid);
-			AclResult	aclresult;
-
-			aclresult = pg_namespace_aclcheck(namespaceId,
-											  GetUserId(),
-											  ACL_CREATE);
-			if (aclresult != ACLCHECK_OK)
-				aclcheck_error(aclresult, ACL_KIND_NAMESPACE,
-							   get_namespace_name(namespaceId));
-
-			renamerel(stmt->objid, stmt->newname, stmt->renameType, stmt);
-			break;
-		}
-
 		case OBJECT_COLUMN:
 		case OBJECT_TRIGGER:
 			{
 				Oid			relid;
 
-				CheckRelationOwnership(stmt->relation, true);
+				/*
+				 * In the dispatcher, resolve the name to OID, and update the
+				 * stmt struct with the OID. In the QE, use the OID from the
+				 * struct (which was filled in by the dispatcher).
+				 */
+				if (Gp_role == GP_ROLE_DISPATCH)
+				{
+					CheckRelationOwnership(stmt->relation, true);
 
-				relid = RangeVarGetRelid(stmt->relation, false);
+					stmt->objid = RangeVarGetRelid(stmt->relation, false);
+				}
+				relid = stmt->objid;
 
 				switch (stmt->renameType)
 				{
+					case OBJECT_TABLE:
+					case OBJECT_SEQUENCE:
+					case OBJECT_VIEW:
+					case OBJECT_INDEX:
+						{
+							/*
+							 * RENAME TABLE requires that we (still) hold
+							 * CREATE rights on the containing namespace, as
+							 * well as ownership of the table.
+							 */
+							Oid			namespaceId = get_rel_namespace(relid);
+							AclResult	aclresult;
+
+							aclresult = pg_namespace_aclcheck(namespaceId,
+															  GetUserId(),
+															  ACL_CREATE);
+							if (aclresult != ACLCHECK_OK)
+								aclcheck_error(aclresult, ACL_KIND_NAMESPACE,
+											get_namespace_name(namespaceId));
+
+							RenameRelation(relid, stmt->newname, stmt->renameType, stmt);
+							break;
+						}
 					case OBJECT_COLUMN:
 						renameatt(relid,
 								  stmt->subname,		/* old att name */
@@ -173,6 +179,10 @@ ExecRenameStmt(RenameStmt *stmt)
 			RenameTSConfiguration(stmt->object, stmt->newname);
 			break;
 
+		case OBJECT_TYPE:
+			RenameType(stmt->object, stmt->newname);
+			break;
+
 		default:
 			elog(ERROR, "unrecognized rename stmt type: %d",
 				 (int) stmt->renameType);
@@ -183,7 +193,7 @@ ExecRenameStmt(RenameStmt *stmt)
 									DF_CANCEL_ON_ERROR|
 									DF_WITH_SNAPSHOT|
 									DF_NEED_TWO_PHASE,
-									NIL, /* FIXME */
+									NIL,
 									NULL);
 	}
 
@@ -249,7 +259,7 @@ ExecAlterObjectSchemaStmt(AlterObjectSchemaStmt *stmt)
 									DF_CANCEL_ON_ERROR|
 									DF_WITH_SNAPSHOT|
 									DF_NEED_TWO_PHASE,
-									NIL, /* FIXME */
+									NIL,
 									NULL);
 	}
 }

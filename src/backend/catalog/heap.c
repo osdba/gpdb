@@ -4,12 +4,13 @@
  *	  code to create and destroy POSTGRES heap relations
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/catalog/heap.c,v 1.327.2.1 2009/02/24 01:38:49 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/catalog/heap.c,v 1.338 2008/08/25 22:42:32 tgl Exp $
  *
  *
  * INTERFACE ROUTINES
@@ -57,12 +58,11 @@
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
-#include "cdb/cdbpartition.h"
-#include "cdb/cdbsreh.h"
+#include "catalog/pg_type_fn.h"
 #include "commands/tablecmds.h"
 #include "commands/typecmds.h"
 #include "miscadmin.h"
-#include "optimizer/clauses.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/var.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_expr.h"
@@ -74,13 +74,16 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"             /* CDB: GetMemoryChunkContext */
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
-#include "cdb/cdbvars.h"
-
+#include "catalog/gp_persistent.h"
 #include "cdb/cdbmirroredfilesysobj.h"
 #include "cdb/cdbpersistentfilesysobj.h"
-#include "catalog/gp_persistent.h"
+#include "cdb/cdbpartition.h"
+#include "cdb/cdbsreh.h"
+#include "cdb/cdbvars.h"
 
 #include "utils/guc.h"
 
@@ -1037,6 +1040,11 @@ InsertPgClassTuple(Relation pg_class_desc,
 	bool		nulls[Natts_pg_class];
 	HeapTuple	tup;
 
+	Assert(should_have_valid_relfrozenxid(
+			   new_rel_oid, rd_rel->relkind, rd_rel->relstorage) ?
+		   (rd_rel->relfrozenxid != InvalidTransactionId) :
+		   (rd_rel->relfrozenxid == InvalidTransactionId));
+
 	/* This is a tad tedious, but way cleaner than what we used to do... */
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
@@ -1148,11 +1156,7 @@ AddNewRelationTuple(Relation pg_class_desc,
 	}
 
 	/* Initialize relfrozenxid */
-	if (relkind == RELKIND_RELATION ||
-		relkind == RELKIND_TOASTVALUE ||
-		relkind == RELKIND_AOSEGMENTS ||
-		relkind == RELKIND_AOBLOCKDIR ||
-		relkind == RELKIND_AOVISIMAP)
+	if (should_have_valid_relfrozenxid(new_rel_oid, relkind, relstorage))
 	{
 		/*
 		 * Initialize to the minimum XID that could put tuples in the table.
@@ -2507,11 +2511,11 @@ heap_drop_with_catalog(Oid relid)
 
 /*
  * Store a default expression for column attnum of relation rel.
- * The expression must be presented as a nodeToString() string.
  */
 void
 StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr)
 {
+	char	   *adbin;
 	char	   *adsrc;
 	Relation	adrel;
 	HeapTuple	tuple;
@@ -2523,6 +2527,11 @@ StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr)
 	Oid			attrdefOid;
 	ObjectAddress colobject,
 				defobject;
+
+	/*
+	 * Flatten expression to string form for storage.
+	 */
+	adbin = nodeToString(expr);
 
 	/*
 	 * Also deparse it to form the mostly-obsolete adsrc field.
@@ -2537,7 +2546,7 @@ StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr)
 	 */
 	values[Anum_pg_attrdef_adrelid - 1] = RelationGetRelid(rel);
 	values[Anum_pg_attrdef_adnum - 1] = attnum;
-	values[Anum_pg_attrdef_adbin - 1] = CStringGetTextDatum(nodeToString(expr));
+	values[Anum_pg_attrdef_adbin - 1] = CStringGetTextDatum(adbin);
 	values[Anum_pg_attrdef_adsrc - 1] = CStringGetTextDatum(adsrc);
 
 	adrel = heap_open(AttrDefaultRelationId, RowExclusiveLock);
@@ -2561,6 +2570,7 @@ StoreAttrDefault(Relation rel, AttrNumber attnum, Node *expr)
 	pfree(DatumGetPointer(values[Anum_pg_attrdef_adbin - 1]));
 	pfree(DatumGetPointer(values[Anum_pg_attrdef_adsrc - 1]));
 	heap_freetuple(tuple);
+	pfree(adbin);
 	pfree(adsrc);
 
 	/*
@@ -2814,23 +2824,25 @@ AddRelationConstraints(Relation rel,
 		if (cdef->contype != CONSTR_CHECK)
 			continue;
 
-		/*
-		 * Transform raw parsetree to executable expression, and verify
-		 * it's valid as a CHECK constraint
-		 */
 		if (cdef->raw_expr != NULL)
 		{
-			Insist(cdef->cooked_expr == NULL);
+			Assert(cdef->cooked_expr == NULL);
+
+			/*
+			 * Transform raw parsetree to executable expression, and verify
+			 * it's valid as a CHECK constraint.
+			 */
 			expr = cookConstraint(pstate, cdef->raw_expr,
 								  RelationGetRelationName(rel));
 		}
-		/*
-		 * Here, we assume the parser will only pass us valid CHECK
-		 * expressions, so we do no particular checking.
-		 */
 		else
 		{
-			Insist(cdef->cooked_expr != NULL);
+			Assert(cdef->cooked_expr != NULL);
+
+			/*
+			 * Here, we assume the parser will only pass us valid CHECK
+			 * expressions, so we do no particular checking.
+			 */
 			expr = stringToNode(cdef->cooked_expr);
 		}
 
@@ -2963,7 +2975,7 @@ cookConstraint (ParseState 	*pstate,
 		ereport(ERROR,
 				(errcode(ERRCODE_GROUPING_ERROR),
 		   errmsg("cannot use aggregate function in check constraint")));
-	if (pstate->p_hasWindFuncs)
+	if (pstate->p_hasWindowFuncs)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 		   errmsg("cannot use window function in check constraint")));
@@ -3072,7 +3084,7 @@ cookDefault(ParseState *pstate,
 		ereport(ERROR,
 				(errcode(ERRCODE_GROUPING_ERROR),
 			 errmsg("cannot use aggregate function in default expression")));
-	if (pstate->p_hasWindFuncs)
+	if (pstate->p_hasWindowFuncs)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 			 errmsg("cannot use window function in default expression")));
@@ -3523,4 +3535,35 @@ insert_ordered_unique_oid(List *list, Oid datum)
 	/* Insert datum into list after 'prev' */
 	lappend_cell_oid(list, prev, datum);
 	return list;
+}
+
+bool
+should_have_valid_relfrozenxid(Oid oid, char relkind, char relstorage)
+{
+	switch (relkind)
+	{
+		case RELKIND_RELATION:
+			if (relstorage == RELSTORAGE_EXTERNAL ||
+				relstorage == RELSTORAGE_FOREIGN  ||
+				relstorage == RELSTORAGE_VIRTUAL ||
+				relstorage == RELSTORAGE_AOROWS ||
+				relstorage == RELSTORAGE_AOCOLS)
+			{
+				return false;
+			}
+
+			/* Persistent tables' always store tuples with forzenXid. */
+			if (GpPersistent_IsPersistentRelation(oid))
+				return false;
+
+			return true;
+
+		case RELKIND_TOASTVALUE:
+		case RELKIND_AOSEGMENTS:
+		case RELKIND_AOBLOCKDIR:
+		case RELKIND_AOVISIMAP:
+			return true;
+	}
+
+	return false;
 }

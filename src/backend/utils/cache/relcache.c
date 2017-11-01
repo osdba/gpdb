@@ -4,12 +4,13 @@
  *	  POSTGRES relation descriptor cache code
  *
  * Portions Copyright (c) 2005-2009, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/cache/relcache.c,v 1.266.2.10 2010/09/02 03:17:06 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/cache/relcache.c,v 1.270 2008/04/01 00:48:33 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -72,6 +73,7 @@
 #include "utils/relationnode.h"
 #include "utils/resowner.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 #include "catalog/gp_policy.h"         /* GpPolicy */
 #include "cdb/cdbtm.h"
@@ -79,6 +81,7 @@
 #include "cdb/cdbmirroredflatfile.h"
 #include "cdb/cdbpersistentfilesysobj.h"
 #include "cdb/cdbsreh.h"
+#include "utils/visibility_summary.h"
 
 
 /*
@@ -95,11 +98,10 @@ static const FormData_pg_attribute Desc_pg_class[Natts_pg_class] = {Schema_pg_cl
 static const FormData_pg_attribute Desc_pg_attribute[Natts_pg_attribute] = {Schema_pg_attribute};
 static const FormData_pg_attribute Desc_pg_proc[Natts_pg_proc] = {Schema_pg_proc};
 static const FormData_pg_attribute Desc_pg_type[Natts_pg_type] = {Schema_pg_type};
-static const FormData_pg_attribute Desc_pg_index[Natts_pg_index] = {Schema_pg_index};
-
 static const FormData_pg_attribute Desc_pg_database[Natts_pg_database] = {Schema_pg_database};
 static const FormData_pg_attribute Desc_pg_authid[Natts_pg_authid] = {Schema_pg_authid};
 static const FormData_pg_attribute Desc_pg_auth_members[Natts_pg_auth_members] = {Schema_pg_auth_members};
+static const FormData_pg_attribute Desc_pg_index[Natts_pg_index] = {Schema_pg_index};
 
 /*
  *		Hash tables that index the relation cache
@@ -219,7 +221,7 @@ static void write_item(const void *data, Size len, FILE *fp);
 
 static void formrdesc(const char *relationName, Oid relationReltype,
 		  bool isshared, bool hasoids,
-		  int natts, const FormData_pg_attribute *att);
+		  int natts, const FormData_pg_attribute *attrs);
 
 static HeapTuple ScanPgRelation(Oid targetRelId, bool indexOK, Relation *pg_class_relation);
 static Relation AllocateRelationDesc(Form_pg_class relp);
@@ -3751,7 +3753,7 @@ AttrDefaultFetch(Relation relation)
 					 RelationGetRelationName(relation));
 			else
 				attrdef[i].adbin = MemoryContextStrdup(CacheMemoryContext,
-												   TextDatumGetCString(val));
+													TextDatumGetCString(val));
 			break;
 		}
 

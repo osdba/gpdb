@@ -43,12 +43,13 @@
  * before switching to the other state or activating a different read pointer.
  *
  *
- * Portions Copyright (c) 2007-2017, Pivotal Software Inc.
+ * Portions Copyright (c) 2007-2010, Greenplum Inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/sort/tuplestore.c,v 1.48.2.1 2009/12/29 17:41:09 heikki Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/sort/tuplestore.c,v 1.38 2008/03/25 19:26:53 neilc Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -174,7 +175,7 @@ struct Tuplestorestate
 	int			readptrsize;	/* allocated length of readptrs array */
 
 	int			writepos_file;	/* file# (valid if READFILE state) */
-	off_t		writepos_offset;	/* offset (valid if READFILE state) */
+	off_t		writepos_offset; /* offset (valid if READFILE) */
 
     /*
      * CDB: EXPLAIN ANALYZE reporting interface and statistics.

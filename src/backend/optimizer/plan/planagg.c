@@ -4,12 +4,13 @@
  *	  Special planning for aggregate queries.
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/plan/planagg.c,v 1.41 2008/07/10 02:14:03 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/plan/planagg.c,v 1.43 2008/08/25 22:42:33 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -18,6 +19,7 @@
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
@@ -26,7 +28,6 @@
 #include "optimizer/predtest.h"
 #include "optimizer/subselect.h"
 #include "parser/parse_clause.h"
-#include "parser/parse_expr.h"
 #include "parser/parsetree.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -249,6 +250,14 @@ find_minmax_aggs_walker(Node *node, List **context)
 		if (list_length(aggref->args) != 1)
 			return true;		/* it couldn't be MIN/MAX */
 		/* note: we do not care if DISTINCT is mentioned ... */
+
+		/*
+		 * We might implement the optimization when a FILTER clause is present
+		 * by adding the filter to the quals of the generated subquery.  For
+		 * now, just punt.
+		 */
+		if (aggref->aggfilter != NULL)
+			return true;
 
 		aggsortop = fetch_agg_sort_op(aggref->aggfnoid);
 		if (!OidIsValid(aggsortop))
@@ -559,7 +568,7 @@ make_agg_subplan(PlannerInfo *root, MinMaxAggInfo *info)
 							   0, 1);
 
     /* Decorate the Limit node with a Flow node. */
-    plan->flow = pull_up_Flow(plan, plan->lefttree, false);
+    plan->flow = pull_up_Flow(plan, plan->lefttree);
 
 	/*
 	 * Convert the plan into an InitPlan, and make a Param for its result.

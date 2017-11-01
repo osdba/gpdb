@@ -32,12 +32,12 @@ mapreduce:
 gpcloud:
 	@if [ "$(enable_gpcloud)" = "yes" ]; then \
 		echo "gpcloud enabled"; \
-		$(MAKE) -C gpcloud; \
+		$(MAKE) -C gpcloud && \
 		$(MAKE) -C gpcloud/bin/gpcheckcloud; \
 	fi
 
 pxf:
-	@if [ "$(with_pxf)" = "yes" ]; then \
+	@if [ "$(enable_pxf)" = "yes" ]; then \
 		echo "pxf enabled"; \
 		$(MAKE) -C pxf; \
 	fi
@@ -47,22 +47,22 @@ install:
 		$(MAKE) -C gpmapreduce install; \
 	fi
 	@if [ "$(enable_gpcloud)" = "yes" ]; then \
-		$(MAKE) -C gpcloud install; \
+		$(MAKE) -C gpcloud install && \
 		$(MAKE) -C gpcloud/bin/gpcheckcloud install; \
 	fi
-	@if [ "$(with_pxf)" = "yes" ]; then \
+	@if [ "$(enable_pxf)" = "yes" ]; then \
 		$(MAKE) -C pxf install; \
 	fi
 
 clean:
 	if [ "$(enable_mapreduce)" = "yes" ]; then $(MAKE) -C gpmapreduce clean; fi
-	if [ "$(enable_gpcloud)" = "yes" ]; then $(MAKE) -C gpcloud clean; fi
-	if [ "$(with_pxf)" = "yes" ]; then $(MAKE) -C pxf clean; fi
+	if [ "$(enable_gpcloud)" = "yes" ]; then $(MAKE) -C gpcloud cleanall; fi
+	if [ "$(enable_pxf)" = "yes" ]; then $(MAKE) -C pxf clean; fi
 
 distclean:
 	if [ "$(enable_mapreduce)" = "yes" ]; then $(MAKE) -C gpmapreduce distclean; fi
 	if [ "$(enable_gpcloud)" = "yes" ]; then $(MAKE) -C gpcloud distclean; fi
-	if [ "$(with_pxf)" = "yes" ]; then $(MAKE) -C pxf distclean; fi
+	if [ "$(enable_pxf)" = "yes" ]; then $(MAKE) -C pxf distclean; fi
 
 installcheck:
 	if [ -d "$(ext_dir)" ]; then \
@@ -74,7 +74,7 @@ installcheck:
 	fi
 
 unittest-check:
-	@if [ "$(with_pxf)" = "yes" ]; then \
+	@if [ "$(enable_pxf)" = "yes" ]; then \
 		echo "pxf enabled"; \
 		$(MAKE) -C pxf unittest-check; \
 	fi

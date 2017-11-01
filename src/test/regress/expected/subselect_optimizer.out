@@ -548,10 +548,52 @@ group by f1,f2,fs;
 (0 rows)
 
 --
+-- Test case for bug #5514 (mishandling of whole-row Vars in subselects)
+--
+create temp table table_a(id integer);
+insert into table_a values (42);
+create temp view view_a as select * from table_a;
+select view_a from view_a;
+ view_a 
+--------
+ (42)
+(1 row)
+
+select (select view_a) from view_a;
+ ?column? 
+----------
+ (42)
+(1 row)
+
+select (select (select view_a)) from view_a;
+ ?column? 
+----------
+ (42)
+(1 row)
+
+select (select (a.*)::text) from view_a a;
+ ?column? 
+----------
+ (42)
+(1 row)
+
+--
 -- Check that whole-row Vars reading the result of a subselect don't include
 -- any junk columns therein
 --
-select q from (select max(f1) as max from int4_tbl group by f1 order by f1) q order by max;
+select q from (select max(f1) from int4_tbl group by f1 order by f1) q
+  order by max;
+       q
+---------------
+ (-2147483647)
+ (-123456)
+ (0)
+ (123456)
+ (2147483647)
+(5 rows)
+
+with q as (select max(f1) from int4_tbl group by f1 order by f1)
+  select q from q;
        q       
 ---------------
  (-2147483647)
@@ -605,3 +647,42 @@ select '1'::text in (select '1'::name union all select '1'::name);
  t
 (1 row)
 
+--
+-- Check sane behavior with nested IN SubLinks
+--
+select * from int4_tbl where
+  (case when f1 in (select unique1 from tenk1 a) then f1 else null end) in
+  (select ten from tenk1 b);
+ f1 
+----
+  0
+(1 row)
+
+--
+-- Check for incorrect optimization when IN subquery contains a SRF
+--
+set enable_hashjoin to 0;
+explain select * from int4_tbl o where (f1, f1) in
+  (select f1, generate_series(1,2) / 10 g from int4_tbl i group by f1);
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice2; segments: 3)  (cost=1.02..2.03 rows=1 width=4)
+   ->  Seq Scan on int4_tbl o  (cost=1.02..2.03 rows=1 width=4)
+         Filter: (hashed SubPlan 1)
+         SubPlan 1
+           ->  Materialize  (cost=1.02..1.03 rows=1 width=4)
+                 ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..1.01 rows=1 width=4)
+                       ->  Result  (cost=0.00..1.01 rows=1 width=4)
+                             ->  Seq Scan on int4_tbl i  (cost=0.00..1.01 rows=1 width=4)
+ Settings:  enable_hashjoin=off; optimizer=on
+ Optimizer status: legacy query optimizer
+(10 rows)
+
+select * from int4_tbl o where (f1, f1) in
+  (select f1, generate_series(1,2) / 10 g from int4_tbl i group by f1);
+ f1 
+----
+  0
+(1 row)
+
+reset enable_hashjoin;

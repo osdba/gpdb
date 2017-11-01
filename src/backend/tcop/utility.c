@@ -10,7 +10,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/tcop/utility.c,v 1.289.2.3 2009/12/09 21:58:16 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/tcop/utility.c,v 1.291 2008/03/19 18:38:30 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -1109,7 +1109,7 @@ ProcessUtility(Node *parsetree,
 														DF_CANCEL_ON_ERROR|
 														DF_WITH_SNAPSHOT|
 														DF_NEED_TWO_PHASE,
-														NIL, /* FIXME */
+														NIL,
 														NULL);
 						}
 					}
@@ -1561,76 +1561,7 @@ ProcessUtility(Node *parsetree,
 			break;
 
 		case T_VariableSetStmt:
-			{
-				VariableSetStmt *n = (VariableSetStmt *) parsetree;
-				ExecSetVariableStmt(n);
-					
-				if (n->kind == VAR_RESET || n->kind == VAR_RESET_ALL)
-				{
-					if (Gp_role == GP_ROLE_DISPATCH)
-					{
-						/*
-						 * RESET must be dispatched different, because it can't
-						 * be in a user transaction
-						 */
-						StringInfoData buffer;
-
-						initStringInfo(&buffer);
-
-						if (n->kind == VAR_RESET_ALL)
-							appendStringInfo(&buffer, "RESET ALL");
-						else
-							appendStringInfo(&buffer, "RESET %s", n->name);
-
-						CdbDispatchCommand(buffer.data, DF_WITH_SNAPSHOT, NULL);
-					}
-				}
-				else
-				{
-					/*
-					 * Special cases for special SQL syntax that effectively sets
-					 * more than one variable per statement.
-					 */
-					if (strcmp(n->name, "TRANSACTION") == 0)
-					{
-						ListCell   *head;
-
-						foreach(head, n->args)
-						{
-							DefElem    *item = (DefElem *) lfirst(head);
-
-							if (strcmp(item->defname, "transaction_isolation") == 0)
-								SetPGVariableOptDispatch("transaction_isolation",
-											  list_make1(item->arg), n->is_local,
-											  /* gp_dispatch */ true);
-							else if (strcmp(item->defname, "transaction_read_only") == 0)
-								SetPGVariableOptDispatch("transaction_read_only",
-											  list_make1(item->arg), n->is_local,
-										      /* gp_dispatch */ true);
-						}
-					}
-					else if (strcmp(n->name, "SESSION CHARACTERISTICS") == 0)
-					{
-						ListCell   *head;
-
-						foreach(head, n->args)
-						{
-							DefElem    *item = (DefElem *) lfirst(head);
-
-							if (strcmp(item->defname, "transaction_isolation") == 0)
-								SetPGVariableOptDispatch("default_transaction_isolation",
-											  list_make1(item->arg), n->is_local,
-										      /* gp_dispatch */ true);
-							else if (strcmp(item->defname, "transaction_read_only") == 0)
-								SetPGVariableOptDispatch("default_transaction_read_only",
-											  list_make1(item->arg), n->is_local,
-											  /* gp_dispatch */ true);
-						}
-					}
-					else
-						SetPGVariableOptDispatch(n->name, n->args, n->is_local, /* gp_dispatch */ true);
-				}
-			}
+			ExecSetVariableStmt((VariableSetStmt *) parsetree);
 			break;
 
 		case T_VariableShowStmt:
@@ -1693,7 +1624,7 @@ ProcessUtility(Node *parsetree,
 												DF_CANCEL_ON_ERROR|
 												DF_WITH_SNAPSHOT|
 												DF_NEED_TWO_PHASE,
-												NIL, /* FIXME */
+												NIL,
 												NULL);
 				}
 			}
@@ -1743,14 +1674,23 @@ ProcessUtility(Node *parsetree,
 			 * ********************* RESOURCE GROUP statements ****
 			 */
 		case T_CreateResourceGroupStmt:
+			if (Gp_role == GP_ROLE_DISPATCH)
+				PreventTransactionChain(isTopLevel, "CREATE RESOURCE GROUP");
+
 			CreateResourceGroup((CreateResourceGroupStmt *) parsetree);
 			break;
 
 		case T_AlterResourceGroupStmt:
+			if (Gp_role == GP_ROLE_DISPATCH)
+				PreventTransactionChain(isTopLevel, "ALTER RESOURCE GROUP");
+
 			AlterResourceGroup((AlterResourceGroupStmt *) parsetree);
 			break;
 
 		case T_DropResourceGroupStmt:
+			if (Gp_role == GP_ROLE_DISPATCH)
+				PreventTransactionChain(isTopLevel, "DROP RESOURCE GROUP");
+
 			DropResourceGroup((DropResourceGroupStmt *) parsetree);
 			break;
 
@@ -1797,7 +1737,7 @@ ProcessUtility(Node *parsetree,
 
 			if (Gp_role == GP_ROLE_DISPATCH)
 			{
-				CdbDispatchCommand("CHECKPOINT", DF_WITH_SNAPSHOT, NULL);
+				CdbDispatchCommand("CHECKPOINT", 0, NULL);
 			}
 			RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT);
 			break;
@@ -2263,6 +2203,9 @@ CreateCommandTag(Node *parsetree)
 					break;
 				case OBJECT_TSCONFIGURATION:
 					tag = "ALTER TEXT SEARCH CONFIGURATION";
+					break;
+				case OBJECT_TYPE:
+					tag = "ALTER TYPE";
 					break;
 				default:
 					tag = "???";

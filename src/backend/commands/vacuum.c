@@ -9,12 +9,13 @@
  *
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/vacuum.c,v 1.364.2.4 2009/12/09 21:58:16 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/vacuum.c,v 1.371 2008/03/26 21:10:38 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -57,6 +58,7 @@
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"             /* pq_beginmessage() etc. */
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "storage/freespace.h"
 #include "storage/proc.h"
@@ -72,12 +74,15 @@
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
-#include "pgstat.h"
+#include "utils/tqual.h"
+
 #include "access/distributedlog.h"
+#include "libpq-fe.h"
+#include "libpq-int.h"
 #include "nodes/makefuncs.h"     /* makeRangeVar */
-#include "gp-libpq-fe.h"
-#include "gp-libpq-int.h"
+#include "pgstat.h"
 
 
 /*
@@ -182,6 +187,11 @@ typedef struct ExecContextData
 } ExecContextData;
 
 typedef ExecContextData *ExecContext;
+
+typedef struct VacuumStatsContext
+{
+	List	   *updated_stats;
+} VacuumStatsContext;
 
 /*
  * State information used during the (full)
@@ -603,15 +613,6 @@ vacuum(VacuumStmt *vacstmt, List *relids,
 			setupRegularDtxContext();
 		}
 		StartTransactionCommand();
-
-		/*
-		 * Re-establish the transaction snapshot.  This is wasted effort when
-		 * we are called as a normal utility command, because the new
-		 * transaction will be dropped immediately by PostgresMain(); but it's
-		 * necessary if we are called from autovacuum because autovacuum might
-		 * continue on to do an ANALYZE-only call.
-		 */
-		ActiveSnapshot = CopySnapshot(GetTransactionSnapshot());
 	}
 
 	if (vacstmt->vacuum && !IsAutoVacuumWorkerProcess())
@@ -1270,10 +1271,7 @@ vacuumStatement_Relation(VacuumStmt *vacstmt, Oid relid,
 			bool 		has_bitmap = false;
 			Relation   *i_rel = NULL;
 
-			stats_context.ctx = vac_context;
-			stats_context.onerel = onerel;
 			stats_context.updated_stats = NIL;
-			stats_context.vac_stats = NULL;
 
 			vac_open_indexes(onerel, AccessShareLock, &nindexes, &i_rel);
 			if (i_rel != NULL)
@@ -1829,6 +1827,7 @@ vac_update_relstats(Oid relid, BlockNumber num_pages, double num_tuples,
 	 * InvalidTransactionId if it has no new data.
 	 */
 	if (TransactionIdIsNormal(frozenxid) &&
+		TransactionIdIsValid(pgcform->relfrozenxid) &&
 		TransactionIdPrecedes(pgcform->relfrozenxid, frozenxid))
 	{
 		pgcform->relfrozenxid = frozenxid;
@@ -1902,27 +1901,13 @@ vac_update_datfrozenxid(void)
 	{
 		Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTup);
 
-		/*
-		 * Only consider heap and TOAST tables (anything else should have
-		 * InvalidTransactionId in relfrozenxid anyway.)
-		 */
-		if (classForm->relkind != RELKIND_RELATION &&
-			classForm->relkind != RELKIND_TOASTVALUE &&
-			classForm->relkind != RELKIND_AOSEGMENTS &&
-			classForm->relkind != RELKIND_AOBLOCKDIR &&
-			classForm->relkind != RELKIND_AOVISIMAP)
+		if (!should_have_valid_relfrozenxid(HeapTupleGetOid(classTup),
+											classForm->relkind,
+											classForm->relstorage))
+		{
+			Assert(!TransactionIdIsValid(classForm->relfrozenxid));
 			continue;
-
-		/* MPP-10108 - exclude relations with external storage */
-		if (classForm->relkind == RELKIND_RELATION && (
-				classForm->relstorage == RELSTORAGE_EXTERNAL ||
-				classForm->relstorage == RELSTORAGE_FOREIGN  ||
-				classForm->relstorage == RELSTORAGE_VIRTUAL))
-			continue;
-
-		/* exclude persistent tables, as all updates to it are frozen */
-		if (GpPersistent_IsPersistentRelation(HeapTupleGetOid(classTup)))
-			continue;
+		}
 
 		Assert(TransactionIdIsNormal(classForm->relfrozenxid));
 
@@ -5014,7 +4999,7 @@ vac_update_fsm(Relation onerel, VacPageList fraged_pages,
 	int			nPages = fraged_pages->num_pages;
 	VacPage    *pagedesc = fraged_pages->pagedesc;
 	Size		threshold;
-	PageFreeSpaceInfo *pageSpaces;
+	FSMPageData *pageSpaces;
 	int			outPages;
 	int			i;
 
@@ -5030,8 +5015,7 @@ vac_update_fsm(Relation onerel, VacPageList fraged_pages,
 	 */
 	threshold = GetAvgFSMRequestSize(&onerel->rd_node);
 
-	pageSpaces = (PageFreeSpaceInfo *)
-		palloc(nPages * sizeof(PageFreeSpaceInfo));
+	pageSpaces = (FSMPageData *) palloc(nPages * sizeof(FSMPageData));
 	outPages = 0;
 
 	for (i = 0; i < nPages; i++)
@@ -5046,8 +5030,8 @@ vac_update_fsm(Relation onerel, VacPageList fraged_pages,
 
 		if (pagedesc[i]->free >= threshold)
 		{
-			pageSpaces[outPages].blkno = pagedesc[i]->blkno;
-			pageSpaces[outPages].avail = pagedesc[i]->free;
+			FSMPageSetPageNum(&pageSpaces[outPages], pagedesc[i]->blkno);
+			FSMPageSetSpace(&pageSpaces[outPages], pagedesc[i]->free);
 			outPages++;
 		}
 	}
@@ -5483,9 +5467,20 @@ open_relation_and_check_permission(VacuumStmt *vacstmt,
 		  (pg_database_ownercheck(MyDatabaseId, GetUserId()) && !onerel->rd_rel->relisshared)))
 	{
 		if (Gp_role != GP_ROLE_EXECUTE)
-			ereport(WARNING,
-					(errmsg("skipping \"%s\" --- only table or database owner can vacuum it",
-							RelationGetRelationName(onerel))));
+		{
+			if (onerel->rd_rel->relisshared)
+				ereport(WARNING,
+						(errmsg("skipping \"%s\" --- only superuser can vacuum it",
+								RelationGetRelationName(onerel))));
+			else if (onerel->rd_rel->relnamespace == PG_CATALOG_NAMESPACE)
+				ereport(WARNING,
+						(errmsg("skipping \"%s\" --- only superuser or database owner can vacuum it",
+								RelationGetRelationName(onerel))));
+			else
+				ereport(WARNING,
+						(errmsg("skipping \"%s\" --- only table or database owner can vacuum it",
+								RelationGetRelationName(onerel))));
+		}
 		relation_close(onerel, lmode);
 		return NULL;
 	}

@@ -234,40 +234,106 @@ CTranslatorRelcacheToDXL::PmdnameRel
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorRelcacheToDXL::PdrgpmdidRelIndexes
+//		CTranslatorRelcacheToDXL::PdrgpmdRelIndexInfo
 //
 //	@doc:
 //		Return the indexes defined on the given relation
 //
 //---------------------------------------------------------------------------
-DrgPmdid *
-CTranslatorRelcacheToDXL::PdrgpmdidRelIndexes
+DrgPmdIndexInfo *
+CTranslatorRelcacheToDXL::PdrgpmdRelIndexInfo
 	(
 	IMemoryPool *pmp,
 	Relation rel
 	)
 {
 	GPOS_ASSERT(NULL != rel);
-	DrgPmdid *pdrgpmdidIndexes = GPOS_NEW(pmp) DrgPmdid(pmp);
 
-	List *plIndexOids = NIL;
-	
-	if (gpdb::FRelPartIsNone(rel->rd_id))
+	if (gpdb::FRelPartIsNone(rel->rd_id) || gpdb::FLeafPartition(rel->rd_id))
 	{
-		// not a partitioned table: obtain indexes directly from the catalog
-		plIndexOids = gpdb::PlRelationIndexes(rel);
+		return PdrgpmdRelIndexInfoNonPartTable(pmp, rel);
 	}
 	else if (gpdb::FRelPartIsRoot(rel->rd_id))
 	{
-		// root of partitioned table: aggregate index information across different parts
-		plIndexOids = PlIndexOidsPartTable(rel);
+		return PdrgpmdRelIndexInfoPartTable(pmp, rel);
 	}
 	else  
 	{
-		// interior or leaf partition: do not consider indexes
-		return pdrgpmdidIndexes;
+		// interior partition: do not consider indexes
+		DrgPmdIndexInfo *pdrgpmdIndexInfo = GPOS_NEW(pmp) DrgPmdIndexInfo(pmp);
+		return pdrgpmdIndexInfo;
 	}
-	
+}
+
+// return index info list of indexes defined on a partitioned table
+DrgPmdIndexInfo *
+CTranslatorRelcacheToDXL::PdrgpmdRelIndexInfoPartTable
+	(
+	IMemoryPool *pmp,
+	Relation relRoot
+	)
+{
+	DrgPmdIndexInfo *pdrgpmdIndexInfo = GPOS_NEW(pmp) DrgPmdIndexInfo(pmp);
+
+	// root of partitioned table: aggregate index information across different parts
+	List *plLogicalIndexInfo = PlIndexInfoPartTable(relRoot);
+
+	ListCell *plc = NULL;
+
+	ForEach (plc, plLogicalIndexInfo)
+	{
+		LogicalIndexInfo *logicalIndexInfo = (LogicalIndexInfo *) lfirst(plc);
+		OID oidIndex = logicalIndexInfo->logicalIndexOid;
+
+		// only add supported indexes
+		Relation relIndex = gpdb::RelGetRelation(oidIndex);
+
+		if (NULL == relIndex)
+		{
+			WCHAR wsz[1024];
+			CWStringStatic str(wsz, 1024);
+			COstreamString oss(&str);
+			oss << (ULONG) oidIndex;
+			GPOS_RAISE(gpdxl::ExmaMD, gpdxl::ExmiMDCacheEntryNotFound, str.Wsz());
+		}
+
+		GPOS_ASSERT(NULL != relIndex->rd_indextuple);
+
+		GPOS_TRY
+		{
+			if (FIndexSupported(relIndex))
+			{
+				CMDIdGPDB *pmdidIndex = GPOS_NEW(pmp) CMDIdGPDB(oidIndex);
+				BOOL fPartial = (NULL != logicalIndexInfo->partCons) || (NIL != logicalIndexInfo->defaultLevels);
+				CMDIndexInfo *pmdIndexInfo = GPOS_NEW(pmp) CMDIndexInfo(pmdidIndex, fPartial);
+				pdrgpmdIndexInfo->Append(pmdIndexInfo);
+			}
+
+			gpdb::CloseRelation(relIndex);
+		}
+		GPOS_CATCH_EX(ex)
+		{
+			gpdb::CloseRelation(relIndex);
+			GPOS_RETHROW(ex);
+		}
+		GPOS_CATCH_END;
+	}
+	return pdrgpmdIndexInfo;
+}
+
+// return index info list of indexes defined on regular, external tables or leaf partitions
+DrgPmdIndexInfo *
+CTranslatorRelcacheToDXL::PdrgpmdRelIndexInfoNonPartTable
+	(
+	IMemoryPool *pmp,
+	Relation rel
+	)
+{
+	DrgPmdIndexInfo *pdrgpmdIndexInfo = GPOS_NEW(pmp) DrgPmdIndexInfo(pmp);
+
+	// not a partitioned table: obtain indexes directly from the catalog
+	List *plIndexOids = gpdb::PlRelationIndexes(rel);
+
 	ListCell *plc = NULL;
 
 	ForEach (plc, plIndexOids)
@@ -293,7 +359,9 @@ CTranslatorRelcacheToDXL::PdrgpmdidRelIndexes
 			if (FIndexSupported(relIndex))
 			{
 				CMDIdGPDB *pmdidIndex = GPOS_NEW(pmp) CMDIdGPDB(oidIndex);
-				pdrgpmdidIndexes->Append(pmdidIndex);
+				// for a regular table, external table or leaf partition, an index is always complete
+				CMDIndexInfo *pmdIndexInfo = GPOS_NEW(pmp) CMDIndexInfo(pmdidIndex, false /* fPartial */);
+				pdrgpmdIndexInfo->Append(pmdIndexInfo);
 			}
 
 			gpdb::CloseRelation(relIndex);
@@ -306,30 +374,24 @@ CTranslatorRelcacheToDXL::PdrgpmdidRelIndexes
 		GPOS_CATCH_END;
 	}
 
-	return pdrgpmdidIndexes;
+	return pdrgpmdIndexInfo;
 }
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorRelcacheToDXL::PlIndexOidsPartTable
+//		CTranslatorRelcacheToDXL::PlIndexInfoPartTable
 //
 //	@doc:
-//		Return the index oids of a partitioned table
+//		Return the index info list of on a partitioned table
 //
 //---------------------------------------------------------------------------
 List *
-CTranslatorRelcacheToDXL::PlIndexOidsPartTable
+CTranslatorRelcacheToDXL::PlIndexInfoPartTable
 	(
 	Relation rel
 	)
 {
-	if (!gpdb::FRelPartIsRoot(rel->rd_id))
-	{
-		// not a partitioned table
-		return NIL;
-	}
-
-	List *plOids = NIL;
+	List *plgidxinfo = NIL;
 	
 	LogicalIndexes *plgidx = gpdb::Plgidx(rel->rd_id);
 
@@ -344,12 +406,12 @@ CTranslatorRelcacheToDXL::PlIndexOidsPartTable
 	for (ULONG ul = 0; ul < ulIndexes; ul++)
 	{
 		LogicalIndexInfo *pidxinfo = (plgidx->logicalIndexInfo)[ul];
-		plOids = gpdb::PlAppendOid(plOids, pidxinfo->logicalIndexOid);
+		plgidxinfo = gpdb::PlAppendElement(plgidxinfo, pidxinfo);
 	}
 	
 	gpdb::GPDBFree(plgidx);
 	
-	return plOids;
+	return plgidxinfo;
 }
 
 //---------------------------------------------------------------------------
@@ -495,7 +557,7 @@ CTranslatorRelcacheToDXL::Pmdrel
 	DrgPmdcol *pdrgpmdcol = NULL;
 	IMDRelation::Ereldistrpolicy ereldistribution = IMDRelation::EreldistrSentinel;
 	DrgPul *pdrpulDistrCols = NULL;
-	DrgPmdid *pdrgpmdidIndexes = NULL;
+	DrgPmdIndexInfo *pdrgpmdIndexInfo = NULL;
 	DrgPmdid *pdrgpmdidTriggers = NULL;
 	DrgPul *pdrgpulPartKeys = NULL;
 	DrgPsz *pdrgpszPartTypes = NULL;
@@ -505,6 +567,7 @@ CTranslatorRelcacheToDXL::Pmdrel
 	DrgPmdid *pdrgpmdidCheckConstraints = NULL;
 	BOOL fTemporary = false;
 	BOOL fHasOids = false;
+	BOOL fPartitioned = false;
 	IMDRelation *pmdrel = NULL;
 
 
@@ -534,7 +597,7 @@ CTranslatorRelcacheToDXL::Pmdrel
 		fConvertHashToRandom = gpdb::FChildPartDistributionMismatch(rel);
 
 		// collect relation indexes
-		pdrgpmdidIndexes = PdrgpmdidRelIndexes(pmp, rel);
+		pdrgpmdIndexInfo = PdrgpmdRelIndexInfo(pmp, rel);
 
 		// collect relation triggers
 		pdrgpmdidTriggers = PdrgpmdidTriggers(pmp, rel);
@@ -544,7 +607,7 @@ CTranslatorRelcacheToDXL::Pmdrel
 		{
 			GetPartKeysAndTypes(pmp, rel, oid, &pdrgpulPartKeys, &pdrgpszPartTypes);
 		}
-		BOOL fPartitioned = (NULL != pdrgpulPartKeys && 0 < pdrgpulPartKeys->UlLength());
+		fPartitioned = (NULL != pdrgpulPartKeys && 0 < pdrgpulPartKeys->UlLength());
 
 		if (fPartitioned && IMDRelation::ErelstorageAppendOnlyParquet != erelstorage && IMDRelation::ErelstorageExternal != erelstorage)
 		{
@@ -607,7 +670,7 @@ CTranslatorRelcacheToDXL::Pmdrel
 							pdrpulDistrCols,
 							fConvertHashToRandom,
 							pdrgpdrgpulKeys,
-							pdrgpmdidIndexes,
+							pdrgpmdIndexInfo,
 							pdrgpmdidTriggers,
 							pdrgpmdidCheckConstraints,
 							extentry->rejectlimit,
@@ -617,8 +680,11 @@ CTranslatorRelcacheToDXL::Pmdrel
 	}
 	else
 	{
-		// get part constraint
-		CMDPartConstraintGPDB *pmdpartcnstr = PmdpartcnstrRelation(pmp, pmda, oid, pdrgpmdcol);
+		CMDPartConstraintGPDB *pmdpartcnstr = NULL;
+
+		// retrieve the part constraints if relation is partitioned
+		if (fPartitioned)
+			pmdpartcnstr = PmdpartcnstrRelation(pmp, pmda, oid, pdrgpmdcol, pdrgpmdIndexInfo->UlLength() > 0 /*fhasIndex*/);
 
 		pmdrel = GPOS_NEW(pmp) CMDRelationGPDB
 							(
@@ -635,7 +701,7 @@ CTranslatorRelcacheToDXL::Pmdrel
 							ulLeafPartitions,
 							fConvertHashToRandom,
 							pdrgpdrgpulKeys,
-							pdrgpmdidIndexes,
+							pdrgpmdIndexInfo,
 							pdrgpmdidTriggers,
 							pdrgpmdidCheckConstraints,
 							pmdpartcnstr,
@@ -680,9 +746,41 @@ CTranslatorRelcacheToDXL::Pdrgpmdcol
 
 		ULONG ulColLen = ULONG_MAX;
 		CMDIdGPDB *pmdidCol = GPOS_NEW(pmp) CMDIdGPDB(att->atttypid);
-		if ((pmdidCol->FEquals(&CMDIdGPDB::m_mdidBPChar) || pmdidCol->FEquals(&CMDIdGPDB::m_mdidVarChar)) && (VARHDRSZ < att->atttypmod))
+		HeapTuple heaptupleStats = gpdb::HtAttrStats(rel->rd_id, ul+1);
+
+		// Column width priority:
+		// 1. If there is average width kept in the stats for that column, pick that value.
+		// 2. If not, if it is a fixed length text type, pick the size of it. E.g if it is
+		//    varchar(10), assign 10 as the column length.
+		// 3. Else if it not dropped and a fixed length type such as int4, assign the fixed
+		//    length.
+		// 4. Otherwise, assign it to default column width which is 8.
+		if(HeapTupleIsValid(heaptupleStats))
+		{
+			Form_pg_statistic fpsStats = (Form_pg_statistic) GETSTRUCT(heaptupleStats);
+
+			// column width
+			ulColLen = fpsStats->stawidth;
+			gpdb::FreeHeapTuple(heaptupleStats);
+		}
+		else if ((pmdidCol->FEquals(&CMDIdGPDB::m_mdidBPChar) || pmdidCol->FEquals(&CMDIdGPDB::m_mdidVarChar)) && (VARHDRSZ < att->atttypmod))
 		{
 			ulColLen = (ULONG) att->atttypmod - VARHDRSZ;
+		}
+		else
+		{
+			DOUBLE dWidth = CStatistics::DDefaultColumnWidth.DVal();
+			ulColLen = (ULONG) dWidth;
+
+			if (!att->attisdropped)
+			{
+				IMDType *pmdtype = CTranslatorRelcacheToDXL::Pmdtype(pmp, pmdidCol);
+				if(pmdtype->FFixedLength())
+				{
+					ulColLen = pmdtype->UlLength();
+				}
+				pmdtype->Release();
+			}
 		}
 
 		CMDColumn *pmdcol = GPOS_NEW(pmp) CMDColumn
@@ -910,7 +1008,8 @@ CTranslatorRelcacheToDXL::AddSystemColumns
 										CTranslatorUtils::PmdidSystemColType(pmp, attno), 
 										false,	// fNullable
 										false,	// fDropped
-										NULL	// default value
+										NULL,	// default value
+										CTranslatorUtils::UlSystemColLength(attno)
 										);
 
 		pdrgpmdcol->Append(pmdcol);
@@ -999,12 +1098,14 @@ CTranslatorRelcacheToDXL::Pmdindex
 			IMDIndex *pmdindex = PmdindexPartTable(pmp, pmda, pmdidIndex, pmdrel, plgidx);
 
 			// cleanup
-			pmdidRel->Release();
-	
 			gpdb::GPDBFree(plgidx);
-			gpdb::CloseRelation(relIndex);
 
-			return pmdindex;
+			if (NULL != pmdindex)
+			{
+				pmdidRel->Release();
+				gpdb::CloseRelation(relIndex);
+				return pmdindex;
+			}
 		}
 	
 		emdindt = IMDIndex::EmdindBtree;
@@ -1060,7 +1161,6 @@ CTranslatorRelcacheToDXL::Pmdindex
 										pgIndex->indisclustered,
 										emdindt,
 										pmdidItemType,
-										false, // fPartial
 										pdrgpulKeyCols,
 										pdrgpulIncludeCols,
 										pdrgpmdidOpFamilies,
@@ -1099,7 +1199,7 @@ CTranslatorRelcacheToDXL::PmdindexPartTable
 	LogicalIndexInfo *pidxinfo = PidxinfoLookup(plind, oid);
 	if (NULL == pidxinfo)
 	{
-		 GPOS_RAISE(gpdxl::ExmaMD, gpdxl::ExmiMDCacheEntryNotFound, pmdidIndex->Wsz());
+		 return NULL;
 	}
 	
 	return PmdindexPartTable(pmp, pmda, pidxinfo, pmdidIndex, pmdrel);
@@ -1254,8 +1354,6 @@ CTranslatorRelcacheToDXL::PmdindexPartTable
 	}
 	gpdb::FreeList(plDefaultLevelsDerived);
 
-	BOOL fPartial = (NULL != pnodePartCnstr || NIL != plDefaultLevels);
-
 	if (NULL == pnodePartCnstr)
 	{
 		if (NIL == plDefaultLevels)
@@ -1294,7 +1392,6 @@ CTranslatorRelcacheToDXL::PmdindexPartTable
 										pgIndex->indisclustered,
 										emdindt,
 										pmdidItemType,
-										fPartial,
 										pdrgpulKeyCols,
 										pdrgpulIncludeCols,
 										pdrgpmdidOpFamilies,
@@ -1690,6 +1787,10 @@ CTranslatorRelcacheToDXL::LookupFuncProps
 
 	CHAR cFuncDataAccess = gpdb::CFuncDataAccess(oidFunc);
 	*pefda = EFuncDataAccess(cFuncDataAccess);
+
+	CHAR cFuncExecLocation = gpdb::CFuncExecLocation(oidFunc);
+	if (cFuncExecLocation != PROEXECLOCATION_ANY)
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("unsupported exec location"));
 
 	*fReturnsSet = gpdb::FFuncRetset(oidFunc);
 	*fStrict = gpdb::FFuncStrict(oidFunc);
@@ -3338,12 +3439,20 @@ CTranslatorRelcacheToDXL::PmdpartcnstrRelation
 	IMemoryPool *pmp,
 	CMDAccessor *pmda,
 	OID oidRel,
-	DrgPmdcol *pdrgpmdcol
+	DrgPmdcol *pdrgpmdcol,
+	bool fhasIndex
 	)
 {
 	// get the part constraints
 	List *plDefaultLevelsRel = NIL;
 	Node *pnode = gpdb::PnodePartConstraintRel(oidRel, &plDefaultLevelsRel);
+
+	// don't retrieve part constraints if there are no indices
+	// and no default partitions at any level
+	if (!fhasIndex && NIL == plDefaultLevelsRel)
+	{
+		return NULL;
+	}
 
 	List *plPartKeys = gpdb::PlPartitionAttrs(oidRel);
 	const ULONG ulLevels = gpdb::UlListLength(plPartKeys);
@@ -3363,32 +3472,46 @@ CTranslatorRelcacheToDXL::PmdpartcnstrRelation
 		}
 	}
 
-	DrgPdxlcd *pdrgpdxlcd = GPOS_NEW(pmp) DrgPdxlcd(pmp);
-	const ULONG ulColumns = pdrgpmdcol->UlLength();
-	for (ULONG ul = 0; ul < ulColumns; ul++)
+	CMDPartConstraintGPDB *pmdpartcnstr = NULL;
+
+	if (!fhasIndex)
 	{
-		const IMDColumn *pmdcol = (*pdrgpmdcol)[ul];
-		CMDName *pmdnameCol = GPOS_NEW(pmp) CMDName(pmp, pmdcol->Mdname().Pstr());
-		CMDIdGPDB *pmdidColType = CMDIdGPDB::PmdidConvert(pmdcol->PmdidType());
-		pmdidColType->AddRef();
-
-		// create a column descriptor for the column
-		CDXLColDescr *pdxlcd = GPOS_NEW(pmp) CDXLColDescr
-										(
-										pmp,
-										pmdnameCol,
-										ul + 1, // ulColId
-										pmdcol->IAttno(),
-										pmdidColType,
-										false // fColDropped
-										);
-		pdrgpdxlcd->Append(pdxlcd);
+		// if there are no indices then we don't need to construct the partition constraint
+		// expression since ORCA is never going to use it.
+		// only send the default partition information.
+		pdrgpulDefaultLevels->AddRef();
+		pmdpartcnstr = GPOS_NEW(pmp) CMDPartConstraintGPDB(pmp, pdrgpulDefaultLevels, fUnbounded, NULL);
 	}
-	
-	CMDPartConstraintGPDB *pmdpartcnstr = PmdpartcnstrFromNode(pmp, pmda, pdrgpdxlcd, pnode, pdrgpulDefaultLevels, fUnbounded);
+	else
+	{
+		DrgPdxlcd *pdrgpdxlcd = GPOS_NEW(pmp) DrgPdxlcd(pmp);
+		const ULONG ulColumns = pdrgpmdcol->UlLength();
+		for (ULONG ul = 0; ul < ulColumns; ul++)
+		{
+			const IMDColumn *pmdcol = (*pdrgpmdcol)[ul];
+			CMDName *pmdnameCol = GPOS_NEW(pmp) CMDName(pmp, pmdcol->Mdname().Pstr());
+			CMDIdGPDB *pmdidColType = CMDIdGPDB::PmdidConvert(pmdcol->PmdidType());
+			pmdidColType->AddRef();
 
-	pdrgpulDefaultLevels->Release();	
-	pdrgpdxlcd->Release();
+			// create a column descriptor for the column
+			CDXLColDescr *pdxlcd = GPOS_NEW(pmp) CDXLColDescr
+											(
+											pmp,
+											pmdnameCol,
+											ul + 1, // ulColId
+											pmdcol->IAttno(),
+											pmdidColType,
+											false // fColDropped
+											);
+			pdrgpdxlcd->Append(pdxlcd);
+		}
+
+		pmdpartcnstr = PmdpartcnstrFromNode(pmp, pmda, pdrgpdxlcd, pnode, pdrgpulDefaultLevels, fUnbounded);
+		pdrgpdxlcd->Release();
+	}
+
+	gpdb::FreeList(plDefaultLevelsRel);
+	pdrgpulDefaultLevels->Release();
 
 	return pmdpartcnstr;
 }
@@ -3441,7 +3564,7 @@ CTranslatorRelcacheToDXL::PmdpartcnstrFromNode
 	GPOS_DELETE(pmapvarcolid);
 
 	pdrgpulDefaultParts->AddRef();
-	return GPOS_NEW(pmp) CMDPartConstraintGPDB(pmp, pdxlnScalar, pdrgpulDefaultParts, fUnbounded);
+	return GPOS_NEW(pmp) CMDPartConstraintGPDB(pmp, pdrgpulDefaultParts, fUnbounded, pdxlnScalar);
 }
 
 //---------------------------------------------------------------------------

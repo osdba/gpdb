@@ -1,9 +1,14 @@
 /*-------------------------------------------------------------------------
  *
  * execDynamicIndexScan.c
- *	  Support routines for iterating through dynamically chosen partitions of an index relation
+ *	  Support routines for iterating through dynamically chosen partitions
+ *	  of an index relation
  *
- * Portions Copyright (c) 2014, Pivotal, Inc.
+ * Portions Copyright (c) 2014-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/executor/execDynamicIndexScan.c
  *
  *-------------------------------------------------------------------------
  */
@@ -474,7 +479,7 @@ IndexScan_BeginIndexScan(IndexScanState *indexScanState, MemoryContext partition
  */
 bool
 IndexScan_BeginIndexPartition(IndexScanState *indexScanState, MemoryContext partitionContext, bool initQual,
-		bool initTargetList, bool supportsArrayKeys, bool isMultiScan)
+		bool initTargetList, bool supportsArrayKeys)
 {
 	/*
 	 * Either the SCAN_INIT should open the relation during SCAN_INIT -> SCAN_FIRST
@@ -600,12 +605,12 @@ IndexScan_BeginIndexPartition(IndexScanState *indexScanState, MemoryContext part
 		 * Initialize scan descriptor.
 		 */
 		indexScanState->iss_ScanDesc =
-				index_beginscan_generic(
+				index_beginscan(
 					indexScanState->ss.ss_currentRelation,
 					indexScanState->iss_RelationDesc,
 					indexScanState->ss.ps.state->es_snapshot,
 					indexScanState->iss_NumScanKeys,
-					indexScanState->iss_ScanKeys, isMultiScan);
+					indexScanState->iss_ScanKeys);
 	}
 	else
 	{

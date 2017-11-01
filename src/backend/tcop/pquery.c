@@ -4,12 +4,13 @@
  *	  POSTGRES process query command code
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/tcop/pquery.c,v 1.120 2008/01/01 19:45:52 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/tcop/pquery.c,v 1.122 2008/03/26 18:48:59 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -19,26 +20,19 @@
 #include "access/xact.h"
 #include "commands/prepare.h"
 #include "commands/trigger.h"
-#include "cdb/cdbvars.h"
-#include "executor/executor.h"          /* ExecutorStart, ExecutorRun, etc */
 #include "miscadmin.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/memutils.h"
-#include "utils/resscheduler.h"
-#include "commands/vacuum.h"
-#include "commands/tablecmds.h"
+#include "utils/snapmgr.h"
+
+#include "cdb/ml_ipc.h"
 #include "commands/queue.h"
-#include "utils/lsyscache.h"
-#include "nodes/makefuncs.h"
-#include "utils/acl.h"
-#include "catalog/catalog.h"
+#include "executor/spi.h"
 #include "postmaster/autostats.h"
 #include "postmaster/backoff.h"
-#include "cdb/ml_ipc.h"
-#include "cdb/memquota.h"
-#include "executor/spi.h"
+#include "utils/resscheduler.h"
 
 
 /*
@@ -573,7 +567,7 @@ FetchStatementTargetList(Node *stmt)
  */
 void
 PortalStart(Portal portal, ParamListInfo params, Snapshot snapshot,
-			const char *seqServerHost, int seqServerPort, QueryDispatchDesc *ddesc)
+			QueryDispatchDesc *ddesc)
 {
 	Portal		saveActivePortal;
 	Snapshot	saveActiveSnapshot;
@@ -585,9 +579,6 @@ PortalStart(Portal portal, ParamListInfo params, Snapshot snapshot,
 
 	AssertArg(PortalIsValid(portal));
 	AssertState(portal->status == PORTAL_DEFINED);
-
-	/* Set up the sequence server */
-	SetupSequenceServer(seqServerHost, seqServerPort);
 
 	portal->releaseResLock = false;
     

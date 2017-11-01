@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/catalog/pg_constraint.h,v 1.27 2008/01/17 18:56:54 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/catalog/pg_constraint.h,v 1.28 2008/03/27 03:57:34 tgl Exp $
  *
  * NOTES
  *	  the genbki.sh script reads this file and generates .bki
@@ -180,27 +180,27 @@ typedef enum ConstraintCategory
  * prototypes for functions in pg_constraint.c
  */
 extern Oid CreateConstraintEntry(const char *constraintName,
-								 Oid constraintNamespace,
-								 char constraintType,
-								 bool isDeferrable,
-								 bool isDeferred,
-								 Oid relId,
-								 const int16 *constraintKey,
-								 int constraintNKeys,
-								 Oid domainId,
-								 Oid foreignRelId,
-								 const int16 *foreignKey,
-								 const Oid *pfEqOp,
-								 const Oid *ppEqOp,
-								 const Oid *ffEqOp,
-								 int foreignNKeys,
-								 char foreignUpdateType,
-								 char foreignDeleteType,
-								 char foreignMatchType,
-								 Oid indexRelId,
-								 Node *conExpr,
-								 const char *conBin,
-								 const char *conSrc);
+					  Oid constraintNamespace,
+					  char constraintType,
+					  bool isDeferrable,
+					  bool isDeferred,
+					  Oid relId,
+					  const int16 *constraintKey,
+					  int constraintNKeys,
+					  Oid domainId,
+					  Oid foreignRelId,
+					  const int16 *foreignKey,
+					  const Oid *pfEqOp,
+					  const Oid *ppEqOp,
+					  const Oid *ffEqOp,
+					  int foreignNKeys,
+					  char foreignUpdateType,
+					  char foreignDeleteType,
+					  char foreignMatchType,
+					  Oid indexRelId,
+					  Node *conExpr,
+					  const char *conBin,
+					  const char *conSrc);
 
 extern void RemoveConstraintById(Oid conId);
 extern void RenameConstraintById(Oid conId, const char *newname);

@@ -19,8 +19,6 @@
 #include "storage/itemptr.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
-#include "utils/resowner.h"
-
 
 /* struct PGPROC is declared in proc.h, but must forward-reference it */
 typedef struct PGPROC PGPROC;
@@ -467,7 +465,7 @@ typedef struct LOCALLOCK
 
 /* Waiter global locallock. (needed by resource queuing). */
 extern LOCALLOCK *awaitedLock;
-extern ResourceOwner awaitedOwner;
+extern struct ResourceOwnerData *awaitedOwner;
 
 /*
  * This struct holds information passed from lmgr internals to the lock
@@ -551,8 +549,9 @@ extern LockAcquireResult LockAcquire(const LOCKTAG *locktag,
 extern bool LockRelease(const LOCKTAG *locktag,
 			LOCKMODE lockmode, bool sessionLock);
 extern void LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks);
-extern void LockReleaseCurrentOwner(void);
-extern void LockReassignCurrentOwner(void);
+// TODO why are we missing extern void LockReleaseSession(LOCKMETHODID lockmethodid); ?
+extern void LockReleaseCurrentOwner(LOCALLOCK **locallocks, int nlocks);
+extern void LockReassignCurrentOwner(LOCALLOCK **locallocks, int nlocks);
 extern VirtualTransactionId *GetLockConflicts(const LOCKTAG *locktag,
 				 LOCKMODE lockmode);
 extern void AtPrepare_Locks(void);

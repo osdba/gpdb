@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/catalog/aclchk.c,v 1.143.2.1 2008/03/24 19:12:58 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/catalog/aclchk.c,v 1.145 2008/03/26 21:10:37 alvherre Exp $
  *
  * NOTES
  *	  See acl.h.
@@ -49,6 +49,8 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
+
 #include "cdb/cdbdisp_query.h"
 #include "cdb/cdbpartition.h"
 #include "cdb/cdbvars.h"
@@ -453,7 +455,8 @@ ExecuteGrantStmt(GrantStmt *stmt)
 				if (priv & ~((AclMode) all_privileges))
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_GRANT_OPERATION),
-							 errmsg(errormsg, privilege_to_string(priv))));
+							 errmsg(errormsg,
+									privilege_to_string(priv))));
 	
 				istmt.privileges |= priv;
 			}
@@ -735,7 +738,7 @@ ExecGrant_Relation(InternalGrant *istmt)
 				char *aclstr = strVal(lfirst(lc));
 				AclItem *newai;
 
-				newai = DatumGetPointer(DirectFunctionCall1(aclitemin,
+				newai = (AclItem *)DatumGetPointer(DirectFunctionCall1(aclitemin,
 											CStringGetDatum(aclstr)));
 
 				aip->ai_grantee = newai->ai_grantee;
@@ -747,7 +750,6 @@ ExecGrant_Relation(InternalGrant *istmt)
 		}
 		else
 		{
-
 			/* 
 			 * Adjust the default permissions based on whether it is a 
 			 * sequence
@@ -808,7 +810,7 @@ ExecGrant_Relation(InternalGrant *istmt)
 					}
 				}
 			}
-	
+
 			/*
 			 * Get owner ID and working copy of existing ACL. If
 			 * there's no ACL, substitute the proper default.
@@ -822,7 +824,7 @@ ExecGrant_Relation(InternalGrant *istmt)
 									 ownerId);
 			else
 				old_acl = DatumGetAclPCopy(aclDatum);
-	
+
 			/* Determine ID to do the grant as, and available grant options */
 			select_best_grantor(GetUserId(), this_privileges,
 								old_acl, ownerId,
@@ -2037,6 +2039,7 @@ pg_class_aclmask(Oid table_oid, Oid roleid,
 			}
 		}
 	}
+
 	/*
 	 * Otherwise, superusers bypass all permission-checking.
 	 */

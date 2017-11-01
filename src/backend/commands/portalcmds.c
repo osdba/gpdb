@@ -10,12 +10,13 @@
  *
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/portalcmds.c,v 1.69.2.2 2008/12/01 17:06:27 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/portalcmds.c,v 1.73 2008/04/02 18:31:50 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -30,14 +31,13 @@
 #include "executor/tstoreReceiver.h"
 #include "tcop/pquery.h"
 #include "utils/memutils.h"
-#include "utils/resscheduler.h"
+#include "utils/snapmgr.h"
 
 #include "cdb/cdbgang.h"
 #include "cdb/cdbvars.h"
 #include "postmaster/backoff.h"
+#include "utils/resscheduler.h"
 
-extern char *savedSeqServerHost;
-extern int savedSeqServerPort;
 
 /*
  * PerformCursorOpen
@@ -118,14 +118,6 @@ PerformCursorOpen(PlannedStmt *stmt, ParamListInfo params,
 
 	portal->is_extended_query = true; /* cursors run in extended query mode */
 
-	/* 
-	 * DeclareCursorStmt is a hybrid utility/select statement. Above, we've nullified
-	 * the utilityStmt within PlannedStmt so this appears like plain SELECT. As a consequence,
-	 * we lose access to the DeclareCursorStmt. To cope, we simply cover over the 
-	 * is_simply_updatable calculation for consumption by CURRENT OF constant folding.
-	 */
-	portal->is_simply_updatable = cstmt->is_simply_updatable;
-
 	/*----------
 	 * Also copy the outer portal's parameter list into the inner portal's
 	 * memory context.	We want to pass down the parameter values in case we
@@ -168,8 +160,7 @@ PerformCursorOpen(PlannedStmt *stmt, ParamListInfo params,
 	/*
 	 * Start execution, inserting parameters if any.
 	 */
-	PortalStart(portal, params, ActiveSnapshot,
-				savedSeqServerHost, savedSeqServerPort, NULL);
+	PortalStart(portal, params, ActiveSnapshot, NULL);
 
 	Assert(portal->strategy == PORTAL_ONE_SELECT);
 
@@ -320,6 +311,7 @@ PortalCleanup(Portal portal)
 
 				/* we do not need AfterTriggerEndQuery() here */
 				ExecutorEnd(queryDesc);
+				FreeQueryDesc(queryDesc);
 			}
 			PG_CATCH();
 			{
@@ -469,6 +461,7 @@ PersistHoldablePortal(Portal portal)
 		portal->queryDesc = NULL;		/* prevent double shutdown */
 		/* we do not need AfterTriggerEndQuery() here */
 		ExecutorEnd(queryDesc);
+		FreeQueryDesc(queryDesc);
 
 		/*
 		 * Set the position in the result set: ideally, this could be

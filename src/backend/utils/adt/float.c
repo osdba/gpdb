@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/adt/float.c,v 1.153.2.1 2009/03/04 22:08:28 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/adt/float.c,v 1.154 2008/03/10 12:39:22 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -362,11 +362,11 @@ float4send(PG_FUNCTION_ARGS)
 Datum
 float8in(PG_FUNCTION_ARGS)
 {
-	char			*num = PG_GETARG_CSTRING(0);
-	char			*orig_num;
-	long double		val;
-	char			*endptr;
-	bool 			literal_inf = true;
+	char	   *num = PG_GETARG_CSTRING(0);
+	char	   *orig_num;
+	long double val;
+	char	   *endptr;
+	bool 		literal_inf = true;
 
 	/*
 	 * endptr points to the first character _after_ the sequence we recognized
@@ -1215,6 +1215,7 @@ i2tof(PG_FUNCTION_ARGS)
 
 	PG_RETURN_FLOAT4((float4) num);
 }
+
 
 /*
  *		=======================

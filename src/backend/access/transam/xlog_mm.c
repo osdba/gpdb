@@ -4,7 +4,12 @@
  *
  * Special xlog handling for master mirroring.
  *
- * Copyright (c) 2010 Greenplum
+ * Portions Copyright (c) 2010 Greenplum
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/access/transam/xlog_mm.c
  *
  *-------------------------------------------------------------------------
  */
@@ -1397,7 +1402,7 @@ mmxlog_add_filespace(
 											/* isPrimary */ false);
 	if (filespaceLocation2 != NULL)
 	{
-		strncpy(m->path2, filespaceLocation2, MAXPGPATH);
+		strlcpy(m->path2, filespaceLocation2, MAXPGPATH);
 		pfree(filespaceLocation2);
 	}
 	else

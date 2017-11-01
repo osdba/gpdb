@@ -4,6 +4,7 @@
  *	  buffer manager interface routines
  *
  * Portions Copyright (c) 2006-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -2026,13 +2027,15 @@ RelationGetNumberOfBlocks(Relation relation)
 	 */
 	if (RelationIsAoRows(relation))
 	{
-		FileSegTotals *fstotal = GetSegFilesTotals(relation, SnapshotNow);
-		return ((BlockNumber)RelationGuessNumberOfBlocks(fstotal->totalbytes));
+		int64		totalbytes;
+
+		totalbytes = GetAOTotalBytes(relation, SnapshotNow);
+		return ((BlockNumber) RelationGuessNumberOfBlocks(totalbytes));
 	}
 	
 	if (RelationIsAoCols(relation))
 	{
-		int64 totalBytes = GetAOCSTotalBytes(relation, SnapshotNow);
+		int64 totalBytes = GetAOCSTotalBytes(relation, SnapshotNow, true);
 		return ((BlockNumber)RelationGuessNumberOfBlocks(totalBytes));
   	}
 	
@@ -2118,7 +2121,7 @@ RelationTruncate(Relation rel, BlockNumber nblocks, bool markPersistentAsPhysica
 XLogRecPtr
 BufferGetLSNAtomic(Buffer buffer)
 {
-	volatile BufferDesc *bufHdr = &BufferDescriptors[buffer - 1];
+	volatile BufferDesc *bufHdr;
 	char				*page = BufferGetPage(buffer);
 	XLogRecPtr			 lsn;
 
@@ -2131,6 +2134,10 @@ BufferGetLSNAtomic(Buffer buffer)
 	/* Make sure we've got a real buffer, and that we hold a pin on it. */
 	Assert(BufferIsValid(buffer));
 	Assert(BufferIsPinned(buffer));
+
+	/* Caller should hold share lock on the buffer contents. */
+	bufHdr = &BufferDescriptors[buffer - 1];
+	Assert(LWLockHeldByMe(bufHdr->content_lock));
 
 	LockBufHdr(bufHdr);
 	lsn = PageGetLSN(page);
@@ -2542,7 +2549,7 @@ MarkBufferDirtyHint(Buffer buffer, Relation relation)
 	{
 		XLogRecPtr	lsn = InvalidXLogRecPtr;
 		bool		dirtied = false;
-		bool	saved_inCommit = MyProc->inCommit;
+		bool		saved_inCommit = false;
 
 		/*
 		 * If checksums are enabled, and the buffer is permanent, then a full
@@ -2564,7 +2571,7 @@ MarkBufferDirtyHint(Buffer buffer, Relation relation)
 			 *
 			 * See src/backend/storage/page/README for longer discussion.
 			 */
-			if (RecoveryInProgress())
+			if (RecoveryInProgress() || IsInitProcessingMode())
 				return;
 
 			/*
@@ -2590,6 +2597,8 @@ MarkBufferDirtyHint(Buffer buffer, Relation relation)
 			 * essential that CreateCheckpoint waits for virtual transactions
 			 * rather than full transactionids.
 			 */
+			Assert(MyProc);
+			saved_inCommit = MyProc->inCommit;
 			MyProc->inCommit = true;
 			if (!relation->rd_istemp)
 			{
@@ -2622,7 +2631,11 @@ MarkBufferDirtyHint(Buffer buffer, Relation relation)
 		bufHdr->flags |= (BM_DIRTY | BM_JUST_DIRTIED);
 		UnlockBufHdr(bufHdr);
 
-		MyProc->inCommit = saved_inCommit;
+		if (!saved_inCommit)
+		{
+			Assert(MyProc);
+			MyProc->inCommit = false;
+		}
 
 		if (dirtied)
 		{

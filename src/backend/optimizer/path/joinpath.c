@@ -4,12 +4,13 @@
  *	  Routines to find all possible paths for processing a set of joins
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/path/joinpath.c,v 1.118 2008/10/04 21:56:53 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/path/joinpath.c,v 1.119 2008/11/22 22:47:06 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -28,17 +29,17 @@
 static void sort_inner_and_outer(PlannerInfo *root, RelOptInfo *joinrel,
 					 RelOptInfo *outerrel, RelOptInfo *innerrel,
 					 List *restrictlist, List *mergeclause_list,
-					 JoinType jointype);
+					 JoinType jointype, SpecialJoinInfo *sjinfo);
 static void match_unsorted_outer(PlannerInfo *root, RelOptInfo *joinrel,
 					 RelOptInfo *outerrel, RelOptInfo *innerrel,
 					 List *restrictlist, List *mergeclause_list,
-					 JoinType jointype);
+					 JoinType jointype, SpecialJoinInfo *sjinfo);
 static void hash_inner_and_outer(PlannerInfo *root, RelOptInfo *joinrel,
 					 Path *outerpath, Path *innerpath,
 					 List *restrictlist,
 					 List *mergeclause_list,    /*CDB*/
 					 List *hashclause_list,     /*CDB*/
-					 JoinType jointype);
+					 JoinType jointype, SpecialJoinInfo *sjinfo);
 static Path *best_appendrel_indexscan(PlannerInfo *root, RelOptInfo *rel,
 						 RelOptInfo *outer_rel, JoinType jointype);
 static List *select_mergejoin_clauses(PlannerInfo *root,
@@ -63,6 +64,10 @@ static List *hashclauses_for_join(List *restrictlist,
  *
  * Modifies the pathlist field of the joinrel node to contain the best
  * paths found so far.
+ *
+ * jointype is not necessarily the same as sjinfo->jointype; it might be
+ * "flipped around" if we are considering joining the rels in the opposite
+ * direction from what's indicated in sjinfo.
  */
 void
 add_paths_to_joinrel(PlannerInfo *root,
@@ -70,6 +75,7 @@ add_paths_to_joinrel(PlannerInfo *root,
 					 RelOptInfo *outerrel,
 					 RelOptInfo *innerrel,
 					 JoinType jointype,
+					 SpecialJoinInfo *sjinfo,
 					 List *restrictlist)
 {
 	List	   *mergeclause_list = NIL;
@@ -81,6 +87,11 @@ add_paths_to_joinrel(PlannerInfo *root,
     Assert(innerrel->pathlist &&
            innerrel->cheapest_startup_path &&
            innerrel->cheapest_total_path);
+
+	/* Don't consider paths that have WorkTableScan as inner rel */
+	if (cdbpath_contains_wts(innerrel->cheapest_startup_path) ||
+		cdbpath_contains_wts(innerrel->cheapest_total_path))
+		return;
 
 	/*
 	 * Find potential mergejoin clauses.  We can skip this if we are not
@@ -106,7 +117,7 @@ add_paths_to_joinrel(PlannerInfo *root,
 		jointype == JOIN_FULL) &&
 		jointype != JOIN_LASJ_NOTIN)
 	    sort_inner_and_outer(root, joinrel, outerrel, innerrel,
-						     restrictlist, mergeclause_list, jointype);
+						     restrictlist, mergeclause_list, jointype, sjinfo);
 
 	/*
 	 * 2. Consider paths where the outer relation need not be explicitly
@@ -114,7 +125,7 @@ add_paths_to_joinrel(PlannerInfo *root,
 	 * path is already ordered.
 	 */
 	match_unsorted_outer(root, joinrel, outerrel, innerrel,
-						 restrictlist, mergeclause_list, jointype);
+						 restrictlist, mergeclause_list, jointype, sjinfo);
 
 #ifdef NOT_USED
 
@@ -130,7 +141,7 @@ add_paths_to_joinrel(PlannerInfo *root,
 	 * invoked with the two rels given in the other order.
 	 */
 	match_unsorted_inner(root, joinrel, outerrel, innerrel,
-						 restrictlist, mergeclause_list, jointype);
+						 restrictlist, mergeclause_list, jointype, sjinfo);
 #endif
 
 	/*
@@ -157,7 +168,8 @@ add_paths_to_joinrel(PlannerInfo *root,
 							     restrictlist,
                                  mergeclause_list,
                                  hashclause_list,
-                                 jointype);
+                                 jointype,
+								 sjinfo);
             if (outerrel->cheapest_startup_path != outerrel->cheapest_total_path)
                 hash_inner_and_outer(root,
                                      joinrel,
@@ -166,7 +178,8 @@ add_paths_to_joinrel(PlannerInfo *root,
 							         restrictlist,
                                      mergeclause_list,
                                      hashclause_list,
-                                     jointype);
+                                     jointype,
+									 sjinfo);
         }
     }
 }
@@ -184,6 +197,7 @@ add_paths_to_joinrel(PlannerInfo *root,
  * 'mergeclause_list' is a list of RestrictInfo nodes for available
  *		mergejoin clauses in this join
  * 'jointype' is the type of join to do
+ * 'sjinfo' is extra info about the join for selectivity estimation
  */
 static void
 sort_inner_and_outer(PlannerInfo *root,
@@ -192,7 +206,8 @@ sort_inner_and_outer(PlannerInfo *root,
 					 RelOptInfo *innerrel,
 					 List *restrictlist,
 					 List *mergeclause_list,
-					 JoinType jointype)
+					 JoinType jointype,
+					 SpecialJoinInfo *sjinfo)
 {
 	bool		useallclauses;
 	Path	   *outer_path;
@@ -208,7 +223,7 @@ sort_inner_and_outer(PlannerInfo *root,
 	{
 		case JOIN_INNER:
 		case JOIN_LEFT:
-		case JOIN_LASJ:
+		case JOIN_ANTI:
 		case JOIN_LASJ_NOTIN:
 			useallclauses = false;
 			break;
@@ -228,6 +243,8 @@ sort_inner_and_outer(PlannerInfo *root,
 	 * assuming here that a sort is required.  We will consider
 	 * cheapest-startup-cost input paths later, and only if they don't need a
 	 * sort.
+	 * If unique-ification is requested, do it and then handle as a plain inner
+	 * join.
 	 */
 	outer_path = outerrel->cheapest_total_path;
 	inner_path = innerrel->cheapest_total_path;
@@ -309,6 +326,7 @@ sort_inner_and_outer(PlannerInfo *root,
 				 create_mergejoin_path(root,
 									   joinrel,
 									   jointype,
+									   sjinfo,
 									   outer_path,
 									   inner_path,
 									   restrictlist,
@@ -352,6 +370,7 @@ sort_inner_and_outer(PlannerInfo *root,
  * 'mergeclause_list' is a list of RestrictInfo nodes for available
  *		mergejoin clauses in this join
  * 'jointype' is the type of join to do
+ * 'sjinfo' is extra info about the join for selectivity estimation
  */
 static void
 match_unsorted_outer(PlannerInfo *root,
@@ -360,7 +379,8 @@ match_unsorted_outer(PlannerInfo *root,
 					 RelOptInfo *innerrel,
 					 List *restrictlist,
 					 List *mergeclause_list,
-					 JoinType jointype)
+					 JoinType jointype,
+					 SpecialJoinInfo *sjinfo)
 {
 	bool		nestjoinOK;
 	bool		useallclauses;
@@ -372,17 +392,17 @@ match_unsorted_outer(PlannerInfo *root,
 	ListCell   *l;
 
 	/*
-	 * Nestloop only supports inner and left joins.  Also, if we are
-	 * doing a right or full join, we must use *all* the mergeclauses as join
-	 * clauses, else we will not have a valid plan.  (Although these two flags
-	 * are currently inverses, keep them separate for clarity and possible
-	 * future changes.)
+	 * Nestloop only supports inner, left, semi, and anti joins.  Also, if we
+	 * are doing a right or full join, we must use *all* the mergeclauses as
+	 * join clauses, else we will not have a valid plan.  (Although these two
+	 * flags are currently inverses, keep them separate for clarity and
+	 * possible future changes.)
 	 */
 	switch (jointype)
 	{
 		case JOIN_INNER:
 		case JOIN_LEFT:
-		case JOIN_LASJ:
+		case JOIN_ANTI:
 		case JOIN_LASJ_NOTIN:
 			nestjoinOK = true;
 			useallclauses = false;
@@ -424,6 +444,8 @@ match_unsorted_outer(PlannerInfo *root,
 				unique_path->umethod == UNIQUE_PATH_HASH)
 				materialize_inner = false;
 		}
+		else if (inner_cheapest_total->pathtype == T_WorkTableScan)
+			materialize_inner = false;
 
 		if (materialize_inner)
 			matpath = (Path *)create_material_path(root, innerrel, inner_cheapest_total);
@@ -482,6 +504,7 @@ match_unsorted_outer(PlannerInfo *root,
 					 create_nestloop_path(root,
 										  joinrel,
 										  jointype,
+										  sjinfo,
 										  outerpath,
 										  inner_cheapest_total,
 										  restrictlist,
@@ -492,6 +515,7 @@ match_unsorted_outer(PlannerInfo *root,
 						 create_nestloop_path(root,
 											  joinrel,
 											  jointype,
+											  sjinfo,
 											  outerpath,
 											  matpath,
 											  restrictlist,
@@ -502,6 +526,7 @@ match_unsorted_outer(PlannerInfo *root,
 						 create_nestloop_path(root,
 											  joinrel,
 											  jointype,
+											  sjinfo,
 											  outerpath,
 											  inner_cheapest_startup,
 											  restrictlist,
@@ -512,6 +537,7 @@ match_unsorted_outer(PlannerInfo *root,
 						 create_nestloop_path(root,
 											  joinrel,
 											  jointype,
+											  sjinfo,
 											  outerpath,
 											  index_cheapest_total,
 											  restrictlist,
@@ -523,6 +549,7 @@ match_unsorted_outer(PlannerInfo *root,
 						 create_nestloop_path(root,
 											  joinrel,
 											  jointype,
+											  sjinfo,
 											  outerpath,
 											  index_cheapest_startup,
 											  restrictlist,
@@ -581,6 +608,7 @@ match_unsorted_outer(PlannerInfo *root,
 				 create_mergejoin_path(root,
 									   joinrel,
 									   jointype,
+									   sjinfo,
 									   outerpath,
 									   inner_cheapest_total,
 									   restrictlist,
@@ -651,6 +679,7 @@ match_unsorted_outer(PlannerInfo *root,
 						 create_mergejoin_path(root,
 											   joinrel,
 											   jointype,
+											   sjinfo,
 											   outerpath,
 											   innerpath,
 											   restrictlist,
@@ -698,6 +727,7 @@ match_unsorted_outer(PlannerInfo *root,
 							 create_mergejoin_path(root,
 												   joinrel,
 												   jointype,
+												   sjinfo,
 												   outerpath,
 												   innerpath,
 												   restrictlist,
@@ -738,7 +768,7 @@ hashclauses_for_join(List *restrictlist,
 			isouterjoin = false;
 			break;
 		case JOIN_LEFT:
-		case JOIN_LASJ:
+		case JOIN_ANTI:
 		case JOIN_LASJ_NOTIN:
 			isouterjoin = true;
 			break;
@@ -810,6 +840,7 @@ hashclauses_for_join(List *restrictlist,
  * 'restrictlist' contains all of the RestrictInfo nodes for restriction
  *		clauses that apply to this join
  * 'jointype' is the type of join to do
+ * 'sjinfo' is extra info about the join for selectivity estimation
  */
 static void
 hash_inner_and_outer(PlannerInfo *root,
@@ -819,14 +850,15 @@ hash_inner_and_outer(PlannerInfo *root,
 					 List *restrictlist,
                      List *mergeclause_list,    /*CDB*/
                      List *hashclause_list,     /*CDB*/
-					 JoinType jointype)
+					 JoinType jointype,
+					 SpecialJoinInfo *sjinfo)
 {
     HashPath   *hjpath;
 
 	/*
-	 * Hashjoin only supports inner, left  and anti joins.
+	 * Hashjoin only supports inner, left, semi, and anti joins.
 	 */
-    Assert(jointype == JOIN_INNER || jointype == JOIN_LEFT || jointype == JOIN_LASJ || jointype == JOIN_LASJ_NOTIN);
+    Assert(jointype == JOIN_INNER || jointype == JOIN_LEFT || jointype == JOIN_LASJ_NOTIN || jointype == JOIN_ANTI);
     Assert(hashclause_list);
 
     /*
@@ -835,6 +867,7 @@ hash_inner_and_outer(PlannerInfo *root,
     hjpath = create_hashjoin_path(root,
 								  joinrel,
 								  jointype,
+								  sjinfo,
 								  outerpath,
 								  innerpath,
 								  restrictlist,

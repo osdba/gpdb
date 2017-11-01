@@ -3,7 +3,12 @@
  * nodeMotion.c
  *	  Routines to handle moving tuples around in Greenplum Database.
  *
- * Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/executor/nodeMotion.c
  *
  *-------------------------------------------------------------------------
  */
@@ -25,7 +30,6 @@
 #include "parser/parsetree.h"
 #include "utils/lsyscache.h"
 #include "utils/tuplesort.h"
-#include "utils/tuplesort_mk.h"
 #include "utils/tuplesort_mk_details.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -674,10 +678,14 @@ execMotionSortedReceiver(MotionState * node)
      */
     else
 	{
-        /* Old element is still at the head of the pq. */
-        AssertState(NULL != (tupHeapInfo = CdbHeap_Min(CdbTupleHeapInfo, hp)) &&
-                    tupHeapInfo->tuple == NULL &&
-                    tupHeapInfo->sourceRouteId == node->routeIdNext);
+#ifdef USE_ASSERT_CHECKING
+		CdbTupleHeapInfo		*t;
+
+		/* Old element is still at the head of the pq. */
+		t = CdbHeap_Min(CdbTupleHeapInfo, hp);
+		Assert(t);
+		AssertState(t->tuple == NULL && t->sourceRouteId == node->routeIdNext);
+#endif
 
         /* Receive the successor of the tuple that we returned last time. */
         recvRC = RecvTupleFrom(node->ps.state->motionlayer_context,

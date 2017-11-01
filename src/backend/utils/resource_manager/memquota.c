@@ -1,12 +1,17 @@
 /*-------------------------------------------------------------------------
  *
  * memquota.c
- * Routines related to memory quota for queries.
+ *	  Routines related to memory quota for queries.
+ *
+ * Portions Copyright (c) 2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  *
  *
- * Copyright (c) 2010, Greenplum inc
- *
- *-------------------------------------------------------------------------*/
+ * IDENTIFICATION
+ *	    src/backend/utils/resource_manager/memquota.c
+ * 
+ *-------------------------------------------------------------------------
+ */
 
 #include "postgres.h"
 
@@ -51,7 +56,6 @@ typedef struct PolicyAutoContext
 static bool PolicyAutoPrelimWalker(Node *node, PolicyAutoContext *context);
 static bool	PolicyAutoAssignWalker(Node *node, PolicyAutoContext *context);
 static bool IsAggMemoryIntensive(Agg *agg);
-static bool IsMemoryIntensiveOperator(Node *node, PlannedStmt *stmt);
 
 struct OperatorGroupNode;
 
@@ -202,23 +206,7 @@ IsBlockingOperator(Node *node)
 }
 
 /**
- * Special-case certain functions which we know are not memory intensive.
- * TODO caragg 03/04/2014: Revert these changes when ORCA has the new partition
- * operator (MPP-22799)
- *
- */
-static bool
-isMemoryIntensiveFunction(Oid funcid)
-{
-	return true;
-}
-
-/**
  * Is a result node memory intensive? It is if it contains function calls.
- * We special-case certain functions used by ORCA which we know that are not
- * memory intensive
- * TODO caragg 03/04/2014: Revert these changes when ORCA has the new partition
- * operator (MPP-22799)
  */
 bool
 IsResultMemoryIntesive(Result *res)
@@ -228,63 +216,24 @@ IsResultMemoryIntesive(Result *res)
 			(Node *) ((Plan *) res)->targetlist, T_FuncExpr);
 
 	int nFuncExpr = list_length(funcNodes);
+	/* Shallow free of the funcNodes list */
+	list_free(funcNodes);
+	funcNodes = NIL;
 	if (nFuncExpr == 0)
 	{
 		/* No function expressions, not memory intensive */
 		return false;
 	}
-
-	bool isMemoryIntensive = false;
-	ListCell *lc = NULL;
-	foreach(lc, funcNodes)
+	else
 	{
-		FuncExpr *funcExpr = lfirst(lc);
-		Assert(IsA(funcExpr, FuncExpr));
-		if ( isMemoryIntensiveFunction(funcExpr->funcid))
-		{
-			/* Found a function that we don't know of. Mark as memory intensive */
-			isMemoryIntensive = true;
-			break;
-		}
+		return true;
 	}
-
-	/* Shallow free of the funcNodes list */
-	list_free(funcNodes);
-	funcNodes = NIL;
-
-	return isMemoryIntensive;
 }
-
-/**
- * Is a function scan memory intensive? Special case some known functions
- * that are not memory intensive.
- */
-static bool
-IsFunctionScanMemoryIntensive(FunctionScan *funcScan, PlannedStmt *stmt)
-{
-	Assert(NULL != stmt);
-	Assert(NULL != funcScan);
-
-	Index rteIndex = funcScan->scan.scanrelid;
-	RangeTblEntry *rte = rt_fetch(rteIndex, stmt->rtable);
-
-	Assert(RTE_FUNCTION == rte->rtekind);
-
-	if (IsA(rte->funcexpr, FuncExpr))
-	{
-		FuncExpr *funcExpr = (FuncExpr *) rte->funcexpr;
-		return isMemoryIntensiveFunction(funcExpr->funcid);
-	}
-
-	/* Didn't find any of our special cases, default is memory intensive */
-	return true;
-}
-
 
 /**
  * Is an operator memory intensive?
  */
-static bool
+bool
 IsMemoryIntensiveOperator(Node *node, PlannedStmt *stmt)
 {
 	Assert(is_plan_node(node));
@@ -295,8 +244,9 @@ IsMemoryIntensiveOperator(Node *node, PlannedStmt *stmt)
 		case T_ShareInputScan:
 		case T_Hash:
 		case T_BitmapIndexScan:
-		case T_Window:
+		case T_WindowAgg:
 		case T_TableFunctionScan:
+		case T_FunctionScan:
 			return true;
 		case T_Agg:
 			{
@@ -307,11 +257,6 @@ IsMemoryIntensiveOperator(Node *node, PlannedStmt *stmt)
 			{
 				Result *res = (Result *) node;
 				return IsResultMemoryIntesive(res);
-			}
-		case T_FunctionScan:
-			{
-				FunctionScan *funcScan = (FunctionScan *) node;
-				return IsFunctionScanMemoryIntensive(funcScan, stmt);
 			}
 		default:
 			return false;
@@ -1035,12 +980,16 @@ ResourceManagerGetQueryMemoryLimit(PlannedStmt* stmt)
 	if (Gp_role != GP_ROLE_DISPATCH)
 		return 0;
 
+	/* no limits in single user mode. */
+	if (!IsUnderPostmaster)
+		return 0;
+
 	Assert(gp_session_id > -1);
 	Assert(ActivePortal != NULL);
 
 	if (IsResQueueEnabled())
 		return ResourceQueueGetQueryMemoryLimit(stmt, ActivePortal->queueId);
-	if (IsResGroupEnabled())
+	if (IsResGroupActivated())
 		return ResourceGroupGetQueryMemoryLimit();
 
 	return 0;

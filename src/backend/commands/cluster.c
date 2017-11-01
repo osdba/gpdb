@@ -7,12 +7,13 @@
  *
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/cluster.c,v 1.169 2008/01/30 19:46:48 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/cluster.c,v 1.172 2008/03/26 21:10:37 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -49,7 +50,9 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 #include "cdb/cdbvars.h"
 #include "cdb/cdbdisp_query.h"
@@ -1141,10 +1144,6 @@ swap_relation_files(Oid r1, Oid r2, TransactionId frozenXid, bool swap_stats)
 
 	/* we should not swap reltoastidxid */
 
-	/* set rel1's frozen Xid */
-	Assert(TransactionIdIsNormal(frozenXid));
-	relform1->relfrozenxid = frozenXid;
-
 	/*
 	 * Swap the AO auxiliary relations and their indexes. Unlike the toast
 	 * relations, we need to swap the index oids as well.
@@ -1184,6 +1183,19 @@ swap_relation_files(Oid r1, Oid r2, TransactionId frozenXid, bool swap_stats)
 	swapchar = relform1->relstorage;
 	relform1->relstorage = relform2->relstorage;
 	relform2->relstorage = swapchar;
+
+	/*
+	 * This needs to be performed after the relkind and relstorage has been
+	 * swapped to correctly reflect the relfrozenxid.
+	 */
+	if (should_have_valid_relfrozenxid(r1, relform1->relkind, relform1->relstorage))
+	{
+		/* set rel1's frozen Xid */
+		Assert(TransactionIdIsNormal(frozenXid));
+		relform1->relfrozenxid = frozenXid;
+	}
+	else
+		relform1->relfrozenxid = InvalidTransactionId;
 
 	if (Debug_persistent_print)
 		elog(Persistent_DebugPrintLevel(), 

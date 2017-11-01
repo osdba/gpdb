@@ -120,79 +120,15 @@ CREATE ROLE role_concurrency_test RESOURCE GROUP rg_concurrency_test;
 -- DROP should fail if there're running transactions
 32:SET ROLE role_concurrency_test;
 32:BEGIN;
-BEGIN;
 DROP ROLE role_concurrency_test;
 DROP RESOURCE GROUP rg_concurrency_test;
-END;
 32:END;
-32:RESET ROLE;
-
--- DROP is abortted
-BEGIN;
-DROP ROLE role_concurrency_test;
-DROP RESOURCE GROUP rg_concurrency_test;
-SELECT r.rsgname, num_running, num_queueing, num_queued, num_executed FROM gp_toolkit.gp_resgroup_status s, pg_resgroup r WHERE s.groupid=r.oid AND r.rsgname='rg_concurrency_test';
-32:SET ROLE role_concurrency_test;
-32&:BEGIN;
-ABORT;
-32<:
-32:SELECT r.rsgname, num_running, num_queueing, num_queued, num_executed FROM gp_toolkit.gp_resgroup_status s, pg_resgroup r WHERE s.groupid=r.oid AND r.rsgname='rg_concurrency_test';
-32:END;
-32:RESET ROLE;
-
--- DROP is committed
-BEGIN;
-DROP ROLE role_concurrency_test;
-DROP RESOURCE GROUP rg_concurrency_test;
-SELECT r.rsgname, num_running, num_queueing, num_queued, num_executed FROM gp_toolkit.gp_resgroup_status s, pg_resgroup r WHERE s.groupid=r.oid AND r.rsgname='rg_concurrency_test';
-32:SET ROLE role_concurrency_test;
-32&:BEGIN;
-END;
-32<:
-32q:
-SELECT r.rsgname, num_running, num_queueing, num_queued, num_executed FROM gp_toolkit.gp_resgroup_status s, pg_resgroup r WHERE s.groupid=r.oid AND r.rsgname='rg_concurrency_test';
 
 DROP ROLE IF EXISTS role_concurrency_test;
 DROP RESOURCE GROUP rg_concurrency_test;
 
 -- test5: concurrently alter resource group cpu rate limit
-
--- start_ignore
-DROP RESOURCE GROUP rg1_concurrency_test;
-DROP RESOURCE GROUP rg2_concurrency_test;
--- end_ignore
-
-CREATE RESOURCE GROUP rg1_concurrency_test WITH (concurrency=2, cpu_rate_limit=10, memory_limit=20);
-CREATE RESOURCE GROUP rg2_concurrency_test WITH (concurrency=2, cpu_rate_limit=20, memory_limit=20);
-
-41:BEGIN;
-41:ALTER RESOURCE GROUP rg1_concurrency_test SET CPU_RATE_LIMIT 35;
-42:BEGIN;
-42&:ALTER RESOURCE GROUP rg2_concurrency_test SET CPU_RATE_LIMIT 35;
-41:ABORT;
-42<:
-42:COMMIT;
-SELECT g.rsgname, c.cpu_rate_limit FROM gp_toolkit.gp_resgroup_config c, pg_resgroup g WHERE c.groupid=g.oid ORDER BY g.oid;
-
-DROP RESOURCE GROUP rg1_concurrency_test;
-DROP RESOURCE GROUP rg2_concurrency_test;
-
-CREATE RESOURCE GROUP rg1_concurrency_test WITH (concurrency=2, cpu_rate_limit=10, memory_limit=20);
-CREATE RESOURCE GROUP rg2_concurrency_test WITH (concurrency=2, cpu_rate_limit=20, memory_limit=20);
-
-41:BEGIN;
-41:ALTER RESOURCE GROUP rg1_concurrency_test SET CPU_RATE_LIMIT 35;
-42:BEGIN;
-42&:ALTER RESOURCE GROUP rg2_concurrency_test SET CPU_RATE_LIMIT 35;
-41:COMMIT;
-42<:
-41q:
-42q:
-SELECT g.rsgname, c.cpu_rate_limit FROM gp_toolkit.gp_resgroup_config c, pg_resgroup g WHERE c.groupid=g.oid ORDER BY g.oid;
-
-DROP RESOURCE GROUP rg1_concurrency_test;
-DROP RESOURCE GROUP rg2_concurrency_test;
-
+-- NONE
 
 -- test6: cancel a query that is waiting for a slot
 DROP ROLE IF EXISTS role_concurrency_test;
@@ -232,5 +168,103 @@ SELECT pg_terminate_backend(procpid) FROM pg_stat_activity WHERE waiting_reason=
 62<:
 61q:
 62q:
+DROP ROLE role_concurrency_test;
+DROP RESOURCE GROUP rg_concurrency_test;
+
+-- test8: create a resgroup with concurrency=0
+DROP ROLE IF EXISTS role_concurrency_test;
+-- start_ignore
+DROP RESOURCE GROUP rg_concurrency_test;
+-- end_ignore
+
+CREATE RESOURCE GROUP rg_concurrency_test WITH (concurrency=0, cpu_rate_limit=20, memory_limit=20);
+CREATE ROLE role_concurrency_test RESOURCE GROUP rg_concurrency_test;
+61:SET ROLE role_concurrency_test;
+61&:BEGIN;
+SELECT pg_cancel_backend(procpid) FROM pg_stat_activity WHERE waiting_reason='resgroup' AND rsgname='rg_concurrency_test';
+61<:
+61q:
+DROP ROLE role_concurrency_test;
+DROP RESOURCE GROUP rg_concurrency_test;
+
+-- test9: SET command should be bypassed
+DROP ROLE IF EXISTS role_concurrency_test;
+-- start_ignore
+DROP RESOURCE GROUP rg_concurrency_test;
+-- end_ignore
+
+CREATE RESOURCE GROUP rg_concurrency_test WITH (concurrency=0, cpu_rate_limit=20, memory_limit=20);
+CREATE ROLE role_concurrency_test RESOURCE GROUP rg_concurrency_test;
+61: SET ROLE role_concurrency_test;
+61&: SELECT 1;
+ALTER RESOURCE GROUP rg_concurrency_test set concurrency 1;
+61<:
+ALTER RESOURCE GROUP rg_concurrency_test set concurrency 0;
+61: SET enable_hashagg to on;
+61: SHOW enable_hashagg;
+61: invalid_syntax;
+61q:
+DROP ROLE role_concurrency_test;
+DROP RESOURCE GROUP rg_concurrency_test;
+
+--
+-- Test cursors, pl/* functions only take one slot.
+--
+-- set concurrency to 1
+CREATE RESOURCE GROUP rg_concurrency_test WITH (concurrency=1, cpu_rate_limit=20, memory_limit=20);
+CREATE ROLE role_concurrency_test RESOURCE GROUP rg_concurrency_test;
+
+-- declare cursors and verify that it only takes one resource group slot
+71:SET ROLE TO role_concurrency_test;
+71:CREATE TABLE foo_concurrency_test as select i as c1 , i as c2 from generate_series(1, 1000) i;
+71:CREATE TABLE bar_concurrency_test as select i as c1 , i as c2 from generate_series(1, 1000) i;
+71:BEGIN;
+71:DECLARE c1 CURSOR for select c1, c2 from foo_concurrency_test order by c1 limit 10;
+71:DECLARE c2 CURSOR for select c1, c2 from bar_concurrency_test order by c1 limit 10;
+71:DECLARE c3 CURSOR for select count(*) from foo_concurrency_test t1, bar_concurrency_test t2 where t1.c2 = t2.c2;
+71:
+71:Fetch ALL FROM c1;
+71:Fetch ALL FROM c2;
+71:Fetch ALL FROM c3;
+71:END;
+
+-- create a pl function and verify that it only takes one resource group slot.
+CREATE OR REPLACE FUNCTION func_concurrency_test () RETURNS integer as /*in func*/
+$$ /*in func*/
+DECLARE /*in func*/
+	tmprecord RECORD; /*in func*/
+	ret integer; /*in func*/
+BEGIN /*in func*/
+	SELECT count(*) INTO ret FROM foo_concurrency_test;	 /*in func*/
+	FOR tmprecord IN SELECT * FROM bar_concurrency_test LOOP /*in func*/
+		SELECT count(*) INTO ret FROM foo_concurrency_test;	 /*in func*/
+	END LOOP; /*in func*/
+ /*in func*/
+	select 1/0; /*in func*/
+EXCEPTION /*in func*/
+	WHEN division_by_zero THEN /*in func*/
+		SELECT count(*) INTO ret FROM foo_concurrency_test;	 /*in func*/
+		raise NOTICE 'divided by zero'; /*in func*/
+	RETURN ret; /*in func*/
+END; /*in func*/
+$$ /*in func*/
+LANGUAGE plpgsql;
+
+71: select func_concurrency_test();
+
+-- Prepare/execute statements and verify that it only takes one resource group slot. 
+71:BEGIN;
+71:PREPARE p1 (integer) as select * from foo_concurrency_test where c2=$1;
+71:PREPARE p2 (integer) as select * from bar_concurrency_test where c2=$1;
+71:EXECUTE p1(1);
+71:EXECUTE p2(2);
+71:END;
+71:PREPARE p3 (integer) as select * from foo_concurrency_test where c2=$1;
+71:PREPARE p4 (integer) as select * from bar_concurrency_test where c2=$1;
+71:EXECUTE p3(1);
+71:EXECUTE p4(2);
+
+DROP TABLE foo_concurrency_test;
+DROP TABLE bar_concurrency_test;
 DROP ROLE role_concurrency_test;
 DROP RESOURCE GROUP rg_concurrency_test;

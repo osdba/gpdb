@@ -35,7 +35,7 @@
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/cache/plancache.c,v 1.23 2008/10/04 21:56:54 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/cache/plancache.c,v 1.17 2008/03/26 18:48:59 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -47,7 +47,6 @@
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "nodes/nodeFuncs.h"
-#include "optimizer/clauses.h"
 #include "optimizer/planmain.h"
 #include "storage/lmgr.h"
 #include "tcop/pquery.h"
@@ -56,6 +55,7 @@
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 
@@ -69,6 +69,7 @@ static void ScanQueryForLocks(Query *parsetree, bool acquire);
 static bool ScanQueryWalker(Node *node, bool *acquire);
 static bool rowmark_member(List *rowMarks, int rt_index);
 static bool plan_list_is_transient(List *stmt_list);
+static bool plan_list_is_oneoff(List *stmt_list);
 static void PlanCacheRelCallback(Datum arg, Oid relid);
 static void PlanCacheFuncCallback(Datum arg, int cacheid, ItemPointer tuplePtr);
 static void PlanCacheSysCallback(Datum arg, int cacheid, ItemPointer tuplePtr);
@@ -320,7 +321,11 @@ StoreCachedPlan(CachedPlanSource *plansource,
 	plan->stmt_list = stmt_list;
 	plan->fully_planned = plansource->fully_planned;
 	plan->dead = false;
-	if (plansource->fully_planned && plan_list_is_transient(stmt_list))
+	if (plansource->fully_planned && plan_list_is_oneoff(stmt_list))
+	{
+		plan->saved_xmin = BootstrapTransactionId;
+	}
+	else if (plansource->fully_planned && plan_list_is_transient(stmt_list))
 	{
 		Assert(TransactionIdIsNormal(TransactionXmin));
 		plan->saved_xmin = TransactionXmin;
@@ -944,6 +949,28 @@ plan_list_is_transient(List *stmt_list)
 			continue;			/* Ignore utility statements */
 
 		if (plannedstmt->transientPlan)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * plan_list_is_oneoff: check if any of the plans in the list are one-off plans
+ */
+static bool
+plan_list_is_oneoff(List *stmt_list)
+{
+	ListCell   *lc;
+
+	foreach(lc, stmt_list)
+	{
+		PlannedStmt *plannedstmt = (PlannedStmt *) lfirst(lc);
+
+		if (!IsA(plannedstmt, PlannedStmt))
+			continue;			/* Ignore utility statements */
+
+		if (plannedstmt->oneoffPlan)
 			return true;
 	}
 

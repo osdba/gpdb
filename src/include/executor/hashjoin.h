@@ -5,6 +5,7 @@
  *
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -190,7 +191,7 @@ typedef struct HashJoinTableData
     bool		eagerlyReleased; /* Has this hash-table been eagerly released? */
 
     HashJoinState * hjstate; /* reference to the enclosing HashJoinState */
-
+    bool first_pass; /* Is this the first pass (pre-rescan) */
 } HashJoinTableData;
 
 #endif   /* HASHJOIN_H */

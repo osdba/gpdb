@@ -139,24 +139,23 @@ select  count(*) over (w2) from customer
 window
     w1 as (),
     w2 as (w1 partition by cn); --error - can't partition if referencing ordering window
-ERROR:  PARTITION BY not allowed when an existing window name is specified
+ERROR:  cannot override PARTITION BY clause of window "w1"
 LINE 4:     w2 as (w1 partition by cn);
                   ^
 select count(*) over (w2) from customer
 window
     w1 as (partition by cloc order by cname),
     w2 as (w1 order by cn); --error - can't reorder the ordering window
-ERROR:  conflicting ORDER BY clauses in window specification
+ERROR:  cannot override ORDER BY clause of window "w1"
 LINE 4:     w2 as (w1 order by cn);
                   ^
 select  count(*) over (w2) from customer
 window 
     w1 as (order by cn rows unbounded preceding),
     w2 as (w1); --error - ordering window can't specify framing
-ERROR:  window specification "w1" cannot have a framing clause
-LINE 3:     w1 as (order by cn rows unbounded preceding),
+ERROR:  cannot copy window "w1" because it has a frame clause
+LINE 4:     w2 as (w1);
                   ^
-HINT:  Window specifications which are referenced by other window specifications cannot have framing clauses
 select * from sale
 window 
     w as (partition by pn),
@@ -185,12 +184,12 @@ select * from customer
 window 
     w as (partition by cn), 
     w as (w order by cname); --error - can't refer to window in its definition
-ERROR:  window "w" cannot reference itself
+ERROR:  window "w" is already defined
 LINE 4:     w as (w order by cname);
                  ^
 select * from customer
 window w as (w order by cname); --error - can't refer to window in its definition
-ERROR:  window "w" cannot reference itself
+ERROR:  window "w" does not exist
 LINE 2: window w as (w order by cname);
                     ^
 -- test the frame parser
@@ -1557,7 +1556,7 @@ from sale_ord;
                                          QUERY PLAN                                         
 --------------------------------------------------------------------------------------------
  Result  (cost=0.00..431.00 rows=6 width=24)
-   ->  Window  (cost=0.00..431.00 rows=6 width=24)
+   ->  WindowAgg  (cost=0.00..431.00 rows=6 width=24)
          Order By: ord, cn
          ->  Gather Motion 2:1  (slice1; segments: 2)  (cost=0.00..431.00 rows=12 width=12)
                Merge Key: ord, cn
@@ -1594,6 +1593,8 @@ sum(count(*)) over (range between 1 preceding and 1 following)
 from sale
 group by cn;
 ERROR:  window specifications with a framing clause must have an ORDER BY clause
+LINE 2: sum(count(*)) over (range between 1 preceding and 1 followin...
+                           ^
 -- test for issue which reopened MPP-1762
 -- We allow the user to specify DESC sort order
 SELECT sale.cn,sale.vn,AVG(cast (sale.vn as int)) OVER(order by ord desc,sale.cn desc) as avg from sale_ord as sale;
@@ -2133,10 +2134,11 @@ select p.proname, p.proargtypes from pg_window w, pg_proc p, pg_proc p2 where w.
 (105 rows)
 
 select lead(cn) from sale;
-ERROR:  function lead(integer) may only be called as a window function
-HINT:  To call a function as a window function use an OVER clause.
+ERROR:  window function call requires an OVER clause
+LINE 1: select lead(cn) from sale;
+               ^
 select cn, cname, lead(cname, -1) over (order by cn) from customer;
-ERROR:  LEAD offset cannot be negative
+ERROR:  ROWS parameter cannot be negative
 -- actual LEAD tests
 select cn, cname, lead(cname, 2, 'undefined') over (order by cn) from customer;
  cn |    cname     |     lead     
@@ -7508,8 +7510,8 @@ from sale group by rollup(cn,dt);
  dt     | date   | 
  sum    | bigint | 
 View definition:
- SELECT "Window".dt, sum("Window".cn) OVER(
-  ORDER BY "Window".att_3 RANGE "Window".att_3 PRECEDING) AS sum
+ SELECT "Window".dt, sum("Window".cn) OVER (
+ ORDER BY "Window".att_3 RANGE "Window".att_3 PRECEDING) AS sum
    FROM ( SELECT sale.cn, sale.dt, grouping(sale.cn) AS att_3
            FROM sale
           GROUP BY ROLLUP (sale.cn, sale.dt)) "Window"(cn, dt, att_3);
@@ -7614,42 +7616,11 @@ select ord, cn,vn,sum(vn) over (order by ord rows between 3 following and floor(
   12 |  4 | 40 |    
 (12 rows)
 
--- Test use of window functions in places they shouldn't be allowed: MPP-2382
--- CHECK constraints
-CREATE TABLE wintest_for_window_seq (i int check (i < count(*) over (order by i)));
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Greenplum Database data distribution key for this table.
-HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-ERROR:  cannot use window function in check constraint
-CREATE TABLE wintest_for_window_seq (i int default count(*) over (order by i));
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Greenplum Database data distribution key for this table.
-HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-ERROR:  cannot use window function in default expression
--- index expression and function
-CREATE TABLE wintest_for_window_seq (i int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Greenplum Database data distribution key for this table.
-HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-CREATE INDEX wintest_idx_for_window_seq on wintest_for_window_seq (i) where i < count(*) over (order by i);
-ERROR:  cannot use window function in index predicate
-CREATE INDEX wintest_idx_for_window_seq on wintest_for_window_seq (sum(i) over (order by i));
-ERROR:  syntax error at or near "("
-LINE 1: ...window_seq on wintest_for_window_seq (sum(i) over (order by ...
-                                                             ^
--- alter table
-ALTER TABLE wintest_for_window_seq alter i set default count(*) over (order by i);
-ERROR:  cannot use window function in default expression
-alter table wintest_for_window_seq alter column i type float using count(*) over (order by
-i)::float;
-ERROR:  cannot use window function in transform expression
--- update
-insert into wintest_for_window_seq values(1);
-update wintest_for_window_seq set i = count(*) over (order by i);
-ERROR:  cannot use window function in UPDATE
 -- domain suport
 create domain wintestd as int default count(*) over ();
 ERROR:  cannot use window function in default expression
 create domain wintestd as int check (value < count(*) over ());
 ERROR:  cannot use window function in check constraint
-drop table wintest_for_window_seq;
 -- MPP-3295
 -- begin equivalent
 select cn,vn,rank() over (partition by cn order by vn) as rank
@@ -7836,7 +7807,8 @@ order by 1,2,3;
  Plain     | Donuts    | 500 | 1 |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |    
 (8 rows)
 
--- MPP-4840
+-- Once upon a time, there was a bug in deparsing a WindowAgg node with EXPLAIN
+-- that this query triggered (MPP-4840)
 explain select n from ( select row_number() over () from (values (0)) as t(x) ) as r(n) group by n;
                                      QUERY PLAN                                      
 -------------------------------------------------------------------------------------
@@ -7846,7 +7818,7 @@ explain select n from ( select row_number() over () from (values (0)) as t(x) ) 
          Group By: row_number
          ->  Sort  (cost=0.00..0.00 rows=1 width=8)
                Sort Key: row_number
-               ->  Window  (cost=0.00..0.00 rows=1 width=8)
+               ->  WindowAgg  (cost=0.00..0.00 rows=1 width=8)
                      ->  Result  (cost=0.00..0.00 rows=1 width=1)
  Settings:  gp_enable_sequential_window_plans=on; optimizer=on; optimizer_segments=3
 (9 rows)
@@ -8055,12 +8027,12 @@ explain select count(*) over (order by i), count(*) over (partition by i order b
                                                  QUERY PLAN                                                  
 -------------------------------------------------------------------------------------------------------------
  Result  (cost=0.00..431.00 rows=1 width=16)
-   ->  Window  (cost=0.00..431.00 rows=1 width=16)
+   ->  WindowAgg  (cost=0.00..431.00 rows=1 width=16)
          Partition By: i
          Order By: j
          ->  Sort  (cost=0.00..431.00 rows=1 width=16)
                Sort Key: i, j
-               ->  Window  (cost=0.00..431.00 rows=1 width=16)
+               ->  WindowAgg  (cost=0.00..431.00 rows=1 width=16)
                      Order By: i
                      ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
                            Merge Key: i
@@ -8257,7 +8229,7 @@ from empsalary;
 --                       
 -- ----------------------------------------------------------------------------------------------------------------------
 --  Gather Motion 2:1  (slice3; segments: 2)  (cost=3.56..3.60 rows=5 width=12)
---    ->  Window  (cost=3.56..3.60 rows=3 width=12)
+--    ->  WindowAgg  (cost=3.56..3.60 rows=3 width=12)
 --          Partition By: bar.a
 --          Order By: bar.b
 --          ->  Sort  (cost=3.56..3.57 rows=3 width=12)
@@ -8294,7 +8266,7 @@ explain select foo.a, sum(b) over (partition by bar.a order by bar.b) from foo, 
 ------------------------------------------------------------------------------------------------------------------
  Gather Motion 2:1  (slice2; segments: 2)  (cost=0.00..862.00 rows=6 width=12)
    ->  Result  (cost=0.00..862.00 rows=3 width=12)
-         ->  Window  (cost=0.00..862.00 rows=3 width=12)
+         ->  WindowAgg  (cost=0.00..862.00 rows=3 width=12)
                Partition By: bar.a
                Order By: bar.b
                ->  Sort  (cost=0.00..862.00 rows=3 width=12)
@@ -8336,3 +8308,53 @@ SELECT bar.*, count(*) OVER() AS e FROM foo, bar where foo.b = bar.d;
 
 reset optimizer_segments;
 drop table foo, bar;
+CREATE TABLE foo (a int, b int, c int, d int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Greenplum Database data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+insert into foo select i,i,i,i from generate_series(1, 10) i;
+-- Check that the planner can spot ORDER BYs that are supersets of each
+-- other, and sort directly to the longest sort order. This query can
+-- be satisfied with just two Sorts.
+EXPLAIN SELECT count(*) over (PARTITION BY a ORDER BY b, c, d) as count1,
+       count(*) over (PARTITION BY a ORDER BY b, c) as count2,
+       count(*) over (PARTITION BY a ORDER BY b) as count3,
+       count(*) over (PARTITION BY a ORDER BY c) as count1,
+       count(*) over (PARTITION BY a ORDER BY c, b) as count2,
+       count(*) over (PARTITION BY a ORDER BY c, b, d) as count3
+FROM foo;
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.01 rows=10 width=48)
+   ->  Result  (cost=0.00..431.01 rows=4 width=48)
+         ->  WindowAgg  (cost=0.00..431.01 rows=4 width=48)
+               Partition By: a
+               Order By: c, b, d
+               ->  Sort  (cost=0.00..431.01 rows=4 width=56)
+                     Sort Key: a, c, b, d
+                     ->  WindowAgg  (cost=0.00..431.00 rows=4 width=56)
+                           Partition By: a
+                           Order By: c, b
+                           ->  Sort  (cost=0.00..431.00 rows=4 width=48)
+                                 Sort Key: a, c, b
+                                 ->  WindowAgg  (cost=0.00..431.00 rows=4 width=48)
+                                       Partition By: a
+                                       Order By: c
+                                       ->  Sort  (cost=0.00..431.00 rows=4 width=40)
+                                             Sort Key: a, c
+                                             ->  WindowAgg  (cost=0.00..431.00 rows=4 width=40)
+                                                   Partition By: a
+                                                   Order By: b
+                                                   ->  WindowAgg  (cost=0.00..431.00 rows=4 width=32)
+                                                         Partition By: a
+                                                         Order By: b, c
+                                                         ->  WindowAgg  (cost=0.00..431.00 rows=4 width=24)
+                                                               Partition By: a
+                                                               Order By: b, c, d
+                                                               ->  Sort  (cost=0.00..431.00 rows=4 width=16)
+                                                                     Sort Key: a, b, c, d
+                                                                     ->  Table Scan on foo  (cost=0.00..431.00 rows=4 width=16)
+ Settings:  gp_enable_sequential_window_plans=on; optimizer=on
+ Optimizer status: PQO version 2.45.0
+(31 rows)
+
+drop table foo;

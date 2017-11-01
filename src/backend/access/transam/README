@@ -1,4 +1,4 @@
-$PostgreSQL: pgsql/src/backend/access/transam/README,v 1.12 2008/10/20 19:18:18 alvherre Exp $
+$PostgreSQL: pgsql/src/backend/access/transam/README,v 1.11 2008/03/21 13:23:28 momjian Exp $
 
 The Transaction System
 ======================
@@ -530,6 +530,14 @@ pages don't count for the XLR_BKP_BLOCK_n numbering.  (XLR_BKP_BLOCK_n is
 associated with the n'th distinct buffer ID seen in the "rdata" array, and
 per the above discussion, fully-rewritable buffers shouldn't be mentioned in
 "rdata".)
+
+Note that we must only use PageSetLSN/PageGetLSN() when we know the action
+is serialised. Only Startup process may modify data blocks during recovery,
+so Startup process may execute PageGetLSN() without fear of serialisation
+problems. All other processes must only call PageSet/GetLSN when holding
+either an exclusive buffer lock or a shared lock plus buffer header lock,
+or be writing the data block directly rather than through shared buffers
+while holding AccessExclusiveLock on the relation.
 
 Due to all these constraints, complex changes (such as a multilevel index
 insertion) normally need to be described by a series of atomic-action WAL

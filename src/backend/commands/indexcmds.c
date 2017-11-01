@@ -4,12 +4,13 @@
  *	  POSTGRES define and remove index code.
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/indexcmds.c,v 1.171 2008/02/07 17:09:51 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/indexcmds.c,v 1.179 2008/08/25 22:42:32 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -34,12 +35,13 @@
 #include "commands/tablespace.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
-#include "parser/parse_agg.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
+#include "rewrite/rewriteManip.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
@@ -50,8 +52,9 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
-#include "utils/faultinjector.h"
+#include "utils/tqual.h"
 
 #include "cdb/cdbcat.h"
 #include "cdb/cdbdisp_query.h"
@@ -60,7 +63,8 @@
 #include "cdb/cdbpartition.h"
 #include "cdb/cdbsrlz.h"
 #include "cdb/cdbvars.h"
-#include "gp-libpq-fe.h"
+#include "libpq-fe.h"
+#include "utils/faultinjector.h"
 
 /* non-export function prototypes */
 static void CheckPredicate(Expr *predicate);
@@ -930,7 +934,7 @@ CheckPredicate(Expr *predicate)
 		ereport(ERROR,
 				(errcode(ERRCODE_GROUPING_ERROR),
 				 errmsg("cannot use aggregate in index predicate")));
-	if (checkExprHasWindFuncs((Node *)predicate))
+	if (checkExprHasWindowFuncs((Node *)predicate))
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("cannot use window function in index predicate")));
@@ -1032,7 +1036,7 @@ ComputeIndexAttrs(IndexInfo *indexInfo,
 				ereport(ERROR,
 						(errcode(ERRCODE_GROUPING_ERROR),
 				errmsg("cannot use aggregate function in index expression")));
-			if (checkExprHasWindFuncs(attribute->expr))
+			if (checkExprHasWindowFuncs(attribute->expr))
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("cannot use window function in index expression")));

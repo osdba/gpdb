@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/tcop/postgres.c,v 1.542.2.5 2009/06/18 10:09:34 heikki Exp $
+ *	  $PostgreSQL: pgsql/src/backend/tcop/postgres.c,v 1.548 2008/04/02 18:31:50 tgl Exp $
  *
  * NOTES
  *	  this is the "main" module of the postgres backend and
@@ -39,6 +39,8 @@
 #ifndef HAVE_GETRUSAGE
 #include "rusagestub.h"
 #endif
+
+#include <pthread.h>
 
 #include "access/distributedlog.h"
 #include "access/printtup.h"
@@ -79,8 +81,7 @@
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/datum.h"
-#include "utils/debugbreak.h"
-#include "utils/session_state.h"
+#include "utils/snapmgr.h"
 #include "mb/pg_wchar.h"
 #include "cdb/cdbvars.h"
 #include "cdb/cdbsrlz.h"
@@ -93,20 +94,18 @@
 #include "utils/guc.h"
 #include "access/twophase.h"
 #include "postmaster/backoff.h"
-#include <pthread.h>
 #include "utils/resource_manager.h"
-#include "utils/resgroup-ops.h"
 #include "pgstat.h"
 #include "executor/nodeFunctionscan.h"
+
 #include "cdb/cdbfilerep.h"
 #include "postmaster/primary_mirror_mode.h"
+#include "utils/debugbreak.h"
+#include "utils/session_state.h"
 #include "utils/vmem_tracker.h"
 
 extern int	optind;
 extern char *optarg;
-
-extern char *savedSeqServerHost;
-extern int savedSeqServerPort;
 
 /* ----------------
  *		global variables
@@ -120,7 +119,7 @@ CommandDest whereToSendOutput = DestDebug;
 /* flag for logging end of session */
 bool		Log_disconnections = false;
 
-LogStmtLevel log_statement = LOGSTMT_NONE;
+int			log_statement = LOGSTMT_NONE;
 
 /* GUC variable for maximum stack depth (measured in kilobytes) */
 int			max_stack_depth = 100;
@@ -1356,11 +1355,13 @@ exec_mpp_query(const char *query_string,
 						  list_make1(plan ? (Node*)plan : (Node*)utilityStmt),
 						  NULL);
 
+		/* Set up the sequence server */
+		SetupSequenceServer(seqServerHost, seqServerPort);
+
 		/*
 		 * Start the portal.
 		 */
-		PortalStart(portal, paramLI, InvalidSnapshot,
-					seqServerHost, seqServerPort, ddesc);
+		PortalStart(portal, paramLI, InvalidSnapshot, ddesc);
 
 		/*
 		 * Select text output format, the default.
@@ -1767,11 +1768,13 @@ exec_simple_query(const char *query_string, const char *seqServerHost, int seqSe
 						  plantree_list,
 						  NULL);
 
+		/* Set up the sequence server */
+		SetupSequenceServer(seqServerHost, seqServerPort);
+
 		/*
 		 * Start the portal.  No parameters here.
 		 */
-		PortalStart(portal, NULL, InvalidSnapshot,
-					seqServerHost, seqServerPort, NULL);
+		PortalStart(portal, NULL, InvalidSnapshot, NULL);
 
 		/*
 		 * Select the appropriate output format: text unless we are doing a
@@ -2361,6 +2364,25 @@ exec_bind_message(StringInfo input_message)
 	}
 
 	/*
+	 * Prepare to copy stuff into the portal's memory context.  We do all this
+	 * copying first, because it could possibly fail (out-of-memory) and we
+	 * don't want a failure to occur between RevalidateCachedPlan and
+	 * PortalDefineQuery; that would result in leaking our plancache refcount.
+	 */
+	oldContext = MemoryContextSwitchTo(PortalGetHeapMemory(portal));
+
+	/* Copy the plan's query string, if available, into the portal */
+	query_string = psrc->query_string;
+	if (query_string)
+		query_string = pstrdup(query_string);
+
+	/* Likewise make a copy of the statement name, unless it's unnamed */
+	if (stmt_name[0])
+		saved_stmt_name = pstrdup(stmt_name);
+	else
+		saved_stmt_name = NULL;
+
+	/*
 	 * Fetch parameters, if any, and store in the portal's memory context.
 	 */
 	if (numParams > 0)
@@ -2520,19 +2542,7 @@ exec_bind_message(StringInfo input_message)
 		 * destruction.
 		 */
 		cplan = RevalidateCachedPlan(psrc, false);
-
-		/*
-		 * Make a copy of the plan in portal's memory context, because GPDB
-		 * would modify the plan tree later in exec_make_plan_constant before
-		 * dispatching, and the modification would make another copy of the plan
-		 * from the same memory context of the plan tree, so if we use the
-		 * cached plan directly here, the copy in exec_make_plan_constant would
-		 * be allocated in CachedPlan context, which lives for the whole life
-		 * span of the process and can cause memory leak.
-		 */
-		oldContext = MemoryContextSwitchTo(PortalGetHeapMemory(portal));
-		plan_list = copyObject(cplan->stmt_list);
-		MemoryContextSwitchTo(oldContext);
+		plan_list = cplan->stmt_list;
 	}
 	else
 	{
@@ -2591,8 +2601,7 @@ exec_bind_message(StringInfo input_message)
 	/*
 	 * And we're ready to start portal execution.
 	 */
-	PortalStart(portal, params, InvalidSnapshot,
-				savedSeqServerHost, savedSeqServerPort, NULL);
+	PortalStart(portal, params, InvalidSnapshot, NULL);
 
 	/*
 	 * Apply the result format requests to the portal.
@@ -4656,17 +4665,9 @@ PostgresMain(int argc, char *argv[],
 	SetProcessingMode(NormalProcessing);
 
 	/*
-	 * Initialize resource scheduler hash structure.
+	 * Initialize resource manager.
 	 */
-	if (IsResQueueEnabled() && Gp_role == GP_ROLE_DISPATCH && !am_walsender)
-	{
-		InitResQueues();
-	}
-	else if (IsResGroupEnabled() && (Gp_role == GP_ROLE_DISPATCH || Gp_role == GP_ROLE_EXECUTE) && !am_walsender)
-	{
-		InitResGroups();
-		ResGroupOps_AdjustGUCs();
-	}
+	InitResManager();
 
 	/*
 	 * Now all GUC states are fully set up.  Report them to client if
@@ -4999,7 +5000,8 @@ PostgresMain(int argc, char *argv[],
 		if (ignore_till_sync && firstchar != EOF)
 			continue;
 
-		elog((Debug_print_full_dtm ? LOG : DEBUG5), "First char: '%c'; gp_role = '%s'.",firstchar,role_to_string(Gp_role));
+		ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+				(errmsg_internal("First char: '%c'; gp_role = '%s'.", firstchar, role_to_string(Gp_role))));
 
 		switch (firstchar)
 		{
@@ -5159,7 +5161,7 @@ PostgresMain(int argc, char *argv[],
 
 					elog((Debug_print_full_dtm ? LOG : DEBUG5), "MPP dispatched stmt from QD: %s.",query_string);
 
-					if (IsResGroupEnabled())
+					if (IsResGroupActivated() && resgroupInfoLen > 0)
 						SwitchResGroupOnSegment(resgroupInfoBuf, resgroupInfoLen);
 
 					if (suid > 0)
@@ -5167,10 +5169,6 @@ PostgresMain(int argc, char *argv[],
 
 					if (ouid > 0 && ouid != GetSessionUserId())
 						SetCurrentRoleId(ouid, ouid_is_super); /* Set the outer UserId */
-
-					// UNDONE: Make this more official...
-					if (TempDtxContextInfo.distributedSnapshot.maxCount == 0)
-						TempDtxContextInfo.distributedSnapshot.maxCount = max_prepared_xacts;
 
 					setupQEDtxContext(&TempDtxContextInfo);
 

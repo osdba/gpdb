@@ -1,5 +1,5 @@
 # -*-makefile-*-
-# $PostgreSQL: pgsql/src/Makefile.global.in,v 1.240 2007/11/13 00:13:19 tgl Exp $
+# $PostgreSQL: pgsql/src/Makefile.global.in,v 1.241 2008/02/17 16:36:43 petere Exp $
 
 #------------------------------------------------------------------------------
 # All PostgreSQL makefiles include this file and use the variables it sets,
@@ -172,10 +172,10 @@ with_libxml	= @with_libxml@
 with_libxslt	= @with_libxslt@
 with_system_tzdata = @with_system_tzdata@
 with_zlib	= @with_zlib@
+with_libbz2	= @with_libbz2@
 with_apr_config	= @with_apr_config@
 with_apu_config	= @with_apu_config@
 with_libsigar	= @with_libsigar@
-with_pxf        = @with_pxf@
 enable_shared	= @enable_shared@
 enable_rpath	= @enable_rpath@
 # NLS is not supported in Greenplum, see comment documenting
@@ -189,6 +189,7 @@ enable_largefile	= @enable_largefile@
 enable_orca		= @enable_orca@
 enable_codegen		= @enable_codegen@
 enable_gpfdist		= @enable_gpfdist@
+enable_pxf			= @enable_pxf@
 enable_snmp			= @enable_snmp@
 enable_ddboost	    = @enable_ddboost@
 enable_netbackup	= @enable_netbackup@

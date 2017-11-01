@@ -33,12 +33,13 @@
  *
  *
  * Portions Copyright (c) 2005-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/postmaster/postmaster.c,v 1.612 2010/06/16 00:54:16 petere Exp $
+ *	  $PostgreSQL: pgsql/src/backend/postmaster/postmaster.c,v 1.554 2008/03/31 02:43:14 tgl Exp $
  *
  * NOTES
  *
@@ -555,7 +556,9 @@ static int	BackendStartup(Port *port);
 static int	ProcessStartupPacket(Port *port, bool SSLdone);
 static void processCancelRequest(Port *port, void *pkt, MsgType code);
 static void processPrimaryMirrorTransitionRequest(Port *port, void *pkt);
+#ifndef USE_SEGWALREP
 static void processPrimaryMirrorTransitionQuery(Port *port, void *pkt);
+#endif
 static int	initMasks(fd_set *rmask);
 static void report_fork_failure_to_client(Port *port, int errnum);
 static enum CAC_state canAcceptConnections(void);
@@ -1153,7 +1156,7 @@ PostmasterMain(int argc, char *argv[])
 	/*
 	 * Check for invalid combinations of GUC settings.
 	 */
-	if (ReservedBackends > MaxBackends)
+	if (ReservedBackends >= MaxBackends)
 	{
 		write_stderr("%s: superuser_reserved_connections must be less than max_connections\n", progname);
 		ExitPostmaster(1);
@@ -1758,19 +1761,20 @@ static void
 checkPgDir(const char *dir)
 {
 	struct stat st;
-	char buf[strlen(DataDir) + strlen(dir) + 32];
+	/*
+	 * DataDir is known to be smaller than MAXPGPATH, and 'dir' argument is always
+	 * a short constant.
+	 */
+	char		buf[MAXPGPATH + MAXPGPATH];
 
-	snprintf(buf, ARRAY_SIZE(buf), "%s%s", DataDir, dir);
-	buf[ARRAY_SIZE(buf) - 1] = '\0';
+	snprintf(buf, sizeof(buf), "%s%s", DataDir, dir);
 
 	if (stat(buf, &st) != 0)
 	{
 		/* check if pg_log is there */
-		snprintf(buf, ARRAY_SIZE(buf), "%s%s", DataDir, "/pg_log");
+		snprintf(buf, sizeof(buf), "%s%s", DataDir, "/pg_log");
 		if (stat(buf, &st) == 0)
-		{
 			elog(LOG, "System file or directory missing (%s), shutting down segment", dir);
-		}
 
 		/* quit all processes and exit */
 		pmdie(SIGQUIT);
@@ -1780,32 +1784,29 @@ checkPgDir(const char *dir)
 /*
  * check if file or directory under current transaction filespace exists and is accessible
  */
-static void checkPgDir2(const char *dir)
+static void
+checkPgDir2(const char *dir)
 {
 	Assert(DataDir);
 
 	struct stat st;
-	char buf[MAXPGPATH];
-	char *path = makeRelativeToTxnFilespace((char*)dir);
+	char	   *path = makeRelativeToTxnFilespace((char*)dir);
 
-	snprintf(buf, MAXPGPATH, "%s", path);
-	buf[ARRAY_SIZE(buf) - 1] = '\0';
-
-	if (stat(buf, &st) != 0)
+	if (stat(path, &st) != 0)
 	{
 		/* check if pg_log is there */
-		snprintf(buf, ARRAY_SIZE(buf), "%s%s", DataDir, "/pg_log");
+		char		buf[MAXPGPATH + MAXPGPATH];
+
+		snprintf(buf, sizeof(buf), "%s%s", DataDir, "/pg_log");
 		if (stat(buf, &st) == 0)
-		{
 			elog(LOG, "System file or directory missing (%s), shutting down segment", path);
-		}
 
 		pfree(path);
 		/* quit all processes and exit */
 		pmdie(SIGQUIT);
 		return;
 	}
-	
+
 	pfree(path);
 }
 
@@ -2694,7 +2695,11 @@ ProcessStartupPacket(Port *port, bool SSLdone)
 	    /* disable the authentication timeout in case it takes a long time */
         if (!disable_sig_alarm(false))
             elog(FATAL, "could not disable timer for authorization timeout");
+#ifdef USE_SEGWALREP
+		HandleFtsWalRepProbe();
+#else
 		processPrimaryMirrorTransitionQuery(port, buf);
+#endif
 		return 127;
 	}
 
@@ -3252,7 +3257,7 @@ static void processTransitionRequest_getFaultInjectStatus(void * buf, int *offse
 		return;
 	}
 
-	if (FaultInjector_IsFaultInjected(FaultInjectorIdentifierStringToEnum(faultName))) {
+	if (FaultInjector_IsFaultInjected(faultName)) {
 		isDone = true;
 	}
 
@@ -3290,9 +3295,9 @@ processTransitionRequest_faultInject(void * inputBuf, int *offsetPtr, int length
 	elog(DEBUG1, "FAULT INJECTED: Name %s Type %s, DDL %s, DB %s, Table %s, NumOccurrences %d  SleepTime %d",
 		 faultName, type, ddlStatement, databaseName, tableName, numOccurrences, sleepTimeSeconds );
 
+	strlcpy(faultInjectorEntry.faultName, faultName, sizeof(faultInjectorEntry.faultName));
 	faultInjectorEntry.faultInjectorIdentifier = FaultInjectorIdentifierStringToEnum(faultName);
-	if (faultInjectorEntry.faultInjectorIdentifier == FaultInjectorIdNotSpecified ||
-		faultInjectorEntry.faultInjectorIdentifier == FaultInjectorIdMax) {
+	if (faultInjectorEntry.faultInjectorIdentifier == FaultInjectorIdNotSpecified) {
 		ereport(COMMERROR, (errcode(ERRCODE_PROTOCOL_VIOLATION),
 							errmsg("could not recognize fault name")));
 
@@ -3574,6 +3579,7 @@ processPrimaryMirrorTransitionRequest(Port *port, void *pkt)
 	}
 }
 
+#ifndef USE_SEGWALREP
 static void
 sendPrimaryMirrorTransitionQuery(uint32 mode, uint32 segstate, uint32 datastate, uint32 faulttype)
 {
@@ -3684,6 +3690,7 @@ processPrimaryMirrorTransitionQuery(Port *port, void *pkt)
 
 	return;
 }
+#endif
 
 /*
  * The client has sent a cancel request packet, not a normal

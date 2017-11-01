@@ -51,11 +51,12 @@
  *
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/path/costsize.c,v 1.198 2008/10/04 21:56:53 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/path/costsize.c,v 1.201 2008/11/22 22:47:05 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -66,17 +67,17 @@
 
 #include "executor/hashjoin.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
 #include "parser/parse_expr.h"
 #include "parser/parsetree.h"
-#include "parser/parse_expr.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/tuplesort.h"
-#include "utils/tuplesort_mk.h"
 
 #include "cdb/cdbpath.h"        /* cdbpath_rows() */
 #include "cdb/cdbvars.h"
@@ -123,7 +124,7 @@ static MergeScanSelCache *cached_scansel(PlannerInfo *root,
 			   PathKey *pathkey);
 static bool cost_qual_eval_walker(Node *node, cost_qual_eval_context *context);
 static Selectivity approx_selectivity(PlannerInfo *root, List *quals,
-				   JoinType jointype);
+				   SpecialJoinInfo *sjinfo);
 static Selectivity join_in_selectivity(JoinPath *path, PlannerInfo *root);
 static double relation_byte_size(double tuples, int width);
 static double page_size(double tuples, int width);
@@ -1700,9 +1701,10 @@ nestloop_inner_path_rows(PlannerInfo *root, Path *path)
  *	  nested loop algorithm.
  *
  * 'path' is already filled in except for the cost fields
+ * 'sjinfo' is extra info about the join for selectivity estimation
  */
 void
-cost_nestloop(NestPath *path, PlannerInfo *root)
+cost_nestloop(NestPath *path, PlannerInfo *root, SpecialJoinInfo *sjinfo)
 {
 	Path	   *outer_path = path->outerjoinpath;
 	Path	   *inner_path = path->innerjoinpath;
@@ -1716,9 +1718,9 @@ cost_nestloop(NestPath *path, PlannerInfo *root)
 	Selectivity joininfactor;
 
 	/*
-	 * If we're doing JOIN_IN then we will stop scanning inner tuples for an
+	 * If we're doing JOIN_SEMI then we will stop scanning inner tuples for an
 	 * outer tuple as soon as we have one match.  Account for the effects of
-	 * this by scaling down the cost estimates in proportion to the JOIN_IN
+	 * this by scaling down the cost estimates in proportion to the JOIN_SEMI
 	 * selectivity.  (This assumes that all the quals attached to the join are
 	 * IN quals, which should be true.)
 	 */
@@ -1773,6 +1775,7 @@ cost_nestloop(NestPath *path, PlannerInfo *root)
  *	  merge join algorithm.
  *
  * 'path' is already filled in except for the cost fields
+ * 'sjinfo' is extra info about the join for selectivity estimation
  *
  * Notes: path's mergeclauses should be a subset of the joinrestrictinfo list;
  * outersortkeys and innersortkeys are lists of the keys to be used
@@ -1780,7 +1783,7 @@ cost_nestloop(NestPath *path, PlannerInfo *root)
  * sort is needed because the source path is already ordered.
  */
 void
-cost_mergejoin(MergePath *path, PlannerInfo *root)
+cost_mergejoin(MergePath *path, PlannerInfo *root, SpecialJoinInfo *sjinfo)
 {
 	Path	   *outer_path = path->jpath.outerjoinpath;
 	Path	   *inner_path = path->jpath.innerjoinpath;
@@ -1827,7 +1830,7 @@ cost_mergejoin(MergePath *path, PlannerInfo *root)
 	 * here when either the outer or inner path is a UniquePath.
 	 */
 	merge_selec = approx_selectivity(root, mergeclauses,
-									 path->jpath.jointype);
+									 sjinfo);
 	cost_qual_eval(&merge_qual_cost, mergeclauses, root);
 	cost_qual_eval(&qp_qual_cost, path->jpath.joinrestrictinfo, root);
 	qp_qual_cost.startup -= merge_qual_cost.startup;
@@ -1928,7 +1931,7 @@ cost_mergejoin(MergePath *path, PlannerInfo *root)
 			innerendsel = cache->leftendsel;
 		}
 		if (path->jpath.jointype == JOIN_LEFT || 
-			path->jpath.jointype == JOIN_LASJ ||
+			path->jpath.jointype == JOIN_ANTI ||
 			path->jpath.jointype == JOIN_LASJ_NOTIN)
 		{
 			outerstartsel = 0.0;
@@ -2025,7 +2028,7 @@ cost_mergejoin(MergePath *path, PlannerInfo *root)
 	/* CPU costs */
 
 	/*
-	 * If we're doing JOIN_IN then we will stop outputting inner tuples for an
+	 * If we're doing JOIN_SEMI then we will stop outputting inner tuples for an
 	 * outer tuple as soon as we have one match.  Account for the effects of
 	 * this by scaling down the cost estimates in proportion to the expected
 	 * output size.  (This assumes that all the quals attached to the join are
@@ -2037,7 +2040,7 @@ cost_mergejoin(MergePath *path, PlannerInfo *root)
 	 * The number of tuple comparisons needed is approximately number of outer
 	 * rows plus number of inner rows plus number of rescanned tuples (can we
 	 * refine this?).  At each one, we need to evaluate the mergejoin quals.
-	 * NOTE: JOIN_IN mode does not save any work here, so do NOT include
+	 * NOTE: JOIN_SEMI mode does not save any work here, so do NOT include
 	 * joininfactor.
 	 */
 	startup_cost += merge_qual_cost.startup;
@@ -2052,7 +2055,7 @@ cost_mergejoin(MergePath *path, PlannerInfo *root)
 	 * cpu_tuple_cost plus the cost of evaluating additional restriction
 	 * clauses that are to be applied at the join.	(This is pessimistic since
 	 * not all of the quals may get evaluated at each tuple.)  This work is
-	 * skipped in JOIN_IN mode, so apply the factor.
+	 * skipped in JOIN_SEMI mode, so apply the factor.
 	 */
 	startup_cost += qp_qual_cost.startup;
 	cpu_per_tuple = cpu_tuple_cost + qp_qual_cost.per_tuple;
@@ -2122,11 +2125,12 @@ cached_scansel(PlannerInfo *root, RestrictInfo *rinfo, PathKey *pathkey)
  *	  hash join algorithm.
  *
  * 'path' is already filled in except for the cost fields
+ * 'path' is already filled in except for the cost fields
  *
  * Note: path's hashclauses should be a subset of the joinrestrictinfo list
  */
 void
-cost_hashjoin(HashPath *path, PlannerInfo *root)
+cost_hashjoin(HashPath *path, PlannerInfo *root, SpecialJoinInfo *sjinfo)
 {
 	Path	   *outer_path = path->jpath.outerjoinpath;
 	Path	   *inner_path = path->jpath.innerjoinpath;
@@ -2156,7 +2160,7 @@ cost_hashjoin(HashPath *path, PlannerInfo *root)
 	 * here when either the outer or inner path is a UniquePath.
 	 */
 	hash_selec = approx_selectivity(root, hashclauses,
-									path->jpath.jointype);
+									sjinfo);
 	cost_qual_eval(&hash_qual_cost, hashclauses, root);
 	cost_qual_eval(&qp_qual_cost, path->jpath.joinrestrictinfo, root);
 	qp_qual_cost.startup -= hash_qual_cost.startup;
@@ -2294,7 +2298,7 @@ cost_hashjoin(HashPath *path, PlannerInfo *root)
 	/* CPU costs */
 
 	/*
-	 * If we're doing JOIN_IN then we will stop comparing inner tuples to an
+	 * If we're doing JOIN_SEMI then we will stop comparing inner tuples to an
 	 * outer tuple as soon as we have one match.  Account for the effects of
 	 * this by scaling down the cost estimates in proportion to the expected
 	 * output size.  (This assumes that all the quals attached to the join are
@@ -2342,6 +2346,93 @@ cost_hashjoin(HashPath *path, PlannerInfo *root)
 
 	path->jpath.path.startup_cost = startup_cost;
 	path->jpath.path.total_cost = startup_cost + run_cost;
+}
+
+
+/*
+ * cost_subplan
+ *		Figure the costs for a SubPlan (or initplan).
+ *
+ * Note: we could dig the subplan's Plan out of the root list, but in practice
+ * all callers have it handy already, so we make them pass it.
+ */
+void
+cost_subplan(PlannerInfo *root, SubPlan *subplan, Plan *plan)
+{
+	QualCost	sp_cost;
+	
+	/* Figure any cost for evaluating the testexpr */
+	cost_qual_eval(&sp_cost,
+				   make_ands_implicit((Expr *) subplan->testexpr),
+				   root);
+	
+	if (subplan->useHashTable)
+	{
+		/*
+		 * If we are using a hash table for the subquery outputs, then the
+		 * cost of evaluating the query is a one-time cost.  We charge one
+		 * cpu_operator_cost per tuple for the work of loading the hashtable,
+		 * too.
+		 */
+		sp_cost.startup += plan->total_cost +
+		cpu_operator_cost * plan->plan_rows;
+		
+		/*
+		 * The per-tuple costs include the cost of evaluating the lefthand
+		 * expressions, plus the cost of probing the hashtable.  We already
+		 * accounted for the lefthand expressions as part of the testexpr,
+		 * and will also have counted one cpu_operator_cost for each
+		 * comparison operator.  That is probably too low for the probing
+		 * cost, but it's hard to make a better estimate, so live with it for
+		 * now.
+		 */
+	}
+	else
+	{
+		/*
+		 * Otherwise we will be rescanning the subplan output on each
+		 * evaluation.  We need to estimate how much of the output we will
+		 * actually need to scan.  NOTE: this logic should agree with the
+		 * tuple_fraction estimates used by make_subplan() in
+		 * plan/subselect.c.
+		 */
+		Cost		plan_run_cost = plan->total_cost - plan->startup_cost;
+		
+		if (subplan->subLinkType == EXISTS_SUBLINK)
+		{
+			/* we only need to fetch 1 tuple */
+			sp_cost.per_tuple += plan_run_cost / plan->plan_rows;
+		}
+		else if (subplan->subLinkType == ALL_SUBLINK ||
+				 subplan->subLinkType == ANY_SUBLINK)
+		{
+			/* assume we need 50% of the tuples */
+			sp_cost.per_tuple += 0.50 * plan_run_cost;
+			/* also charge a cpu_operator_cost per row examined */
+			sp_cost.per_tuple += 0.50 * plan->plan_rows * cpu_operator_cost;
+		}
+		else
+		{
+			/* assume we need all tuples */
+			sp_cost.per_tuple += plan_run_cost;
+		}
+		
+		/*
+		 * Also account for subplan's startup cost. If the subplan is
+		 * uncorrelated or undirect correlated, AND its topmost node is a Sort
+		 * or Material node, assume that we'll only need to pay its startup
+		 * cost once; otherwise assume we pay the startup cost every time.
+		 */
+		if (subplan->parParam == NIL &&
+			(IsA(plan, Sort) ||
+			 IsA(plan, Material)))
+			sp_cost.startup += plan->startup_cost;
+		else
+			sp_cost.per_tuple += plan->startup_cost;
+	}
+	
+	subplan->startup_cost = sp_cost.startup;
+	subplan->per_call_cost = sp_cost.per_tuple;
 }
 
 /*
@@ -2548,79 +2639,30 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 		 * subplan will be executed on each evaluation, so charge accordingly.
 		 * (Sub-selects that can be executed as InitPlans have already been
 		 * removed from the expression.)
-		 *
-		 * An exception occurs when we have decided we can implement the
-		 * subplan by hashing.
 		 */
 		SubPlan    *subplan = (SubPlan *) node;
-		Plan	   *plan = planner_subplan_get_plan(context->root, subplan);
-
-		if (subplan->useHashTable)
-		{
-			/*
-			 * If we are using a hash table for the subquery outputs, then the
-			 * cost of evaluating the query is a one-time cost. We charge one
-			 * cpu_operator_cost per tuple for the work of loading the
-			 * hashtable, too.
-			 */
-			context->total.startup += plan->total_cost +
-				cpu_operator_cost * plan->plan_rows;
-
-			/*
-			 * The per-tuple costs include the cost of evaluating the lefthand
-			 * expressions, plus the cost of probing the hashtable. Recursion
-			 * into the testexpr will handle the lefthand expressions
-			 * properly, and will count one cpu_operator_cost for each
-			 * comparison operator.  That is probably too low for the probing
-			 * cost, but it's hard to make a better estimate, so live with it
-			 * for now.
-			 */
-		}
-		else
-		{
-			/*
-			 * Otherwise we will be rescanning the subplan output on each
-			 * evaluation.	We need to estimate how much of the output we will
-			 * actually need to scan.  NOTE: this logic should agree with
-			 * get_initplan_cost, below, and with the estimates used by
-			 * make_subplan() in plan/subselect.c.
-			 */
-			Cost		plan_run_cost = plan->total_cost - plan->startup_cost;
-
-			if (subplan->subLinkType == EXISTS_SUBLINK)
-			{
-				/* we only need to fetch 1 tuple */
-				context->total.per_tuple += plan_run_cost / plan->plan_rows;
-			}
-			else if (subplan->subLinkType == ALL_SUBLINK ||
-					 subplan->subLinkType == ANY_SUBLINK)
-			{
-				/* assume we need 50% of the tuples */
-				context->total.per_tuple += 0.50 * plan_run_cost;
-				/* also charge a cpu_operator_cost per row examined */
-				context->total.per_tuple +=
-					0.50 * plan->plan_rows * cpu_operator_cost;
-			}
-			else
-			{
-				/* assume we need all tuples */
-				context->total.per_tuple += plan_run_cost;
-			}
-
-			/*
-			 * Also account for subplan's startup cost. If the subplan is
-			 * uncorrelated or undirect correlated, AND its topmost node is a
-			 * Sort or Material node, assume that we'll only need to pay its
-			 * startup cost once; otherwise assume we pay the startup cost
-			 * every time.
-			 */
-			if (subplan->parParam == NIL &&
-				(IsA(plan, Sort) ||
-				 IsA(plan, Material)))
-				context->total.startup += plan->startup_cost;
-			else
-				context->total.per_tuple += plan->startup_cost;
-		}
+		
+		context->total.startup += subplan->startup_cost;
+		context->total.per_tuple += subplan->per_call_cost;
+		
+		/*
+		 * We don't want to recurse into the testexpr, because it was already
+		 * counted in the SubPlan node's costs.  So we're done.
+		 */
+		return false;
+	}
+	else if (IsA(node, AlternativeSubPlan))
+	{
+		/*
+		 * Arbitrarily use the first alternative plan for costing.  (We should
+		 * certainly only include one alternative, and we don't yet have
+		 * enough information to know which one the executor is most likely
+		 * to use.)
+		 */
+		AlternativeSubPlan *asplan = (AlternativeSubPlan *) node;
+		
+		return cost_qual_eval_walker((Node *) linitial(asplan->subplans),
+									 context);
 	}
 
 	/* recurse into children */
@@ -2628,49 +2670,14 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 								  (void *) context);
 }
 
-
-/*
- * get_initplan_cost
- *		Get the expected cost of evaluating an initPlan.
- *
- * Keep this in sync with cost_qual_eval_walker's handling of subplans, above,
- * and with the estimates used by make_subplan() in plan/subselect.c.
- */
-Cost
-get_initplan_cost(PlannerInfo *root, SubPlan *subplan)
-{
-	Cost		result;
-	Plan	   *plan = planner_subplan_get_plan(root, subplan);
-
-	/* initPlans never use hashtables */
-	Assert(!subplan->useHashTable);
-	/* they are never ALL or ANY, either */
-	Assert(!(subplan->subLinkType == ALL_SUBLINK ||
-			 subplan->subLinkType == ANY_SUBLINK));
-
-	if (subplan->subLinkType == EXISTS_SUBLINK)
-	{
-		/* we only need to fetch 1 tuple */
-		Cost		plan_run_cost = plan->total_cost - plan->startup_cost;
-
-		result = plan->startup_cost;
-		result += plan_run_cost / plan->plan_rows;
-	}
-	else
-	{
-		/* assume we need all tuples */
-		result = plan->total_cost;
-	}
-
-	return result;
-}
-
-
 /*
  * approx_selectivity
  *		Quick-and-dirty estimation of clause selectivities.
  *		The input can be either an implicitly-ANDed list of boolean
  *		expressions, or a list of RestrictInfo nodes (typically the latter).
+ *
+ * Currently this is only used in join estimation, so sjinfo should never
+ * be NULL.
  *
  * This is quick-and-dirty because we bypass clauselist_selectivity, and
  * simply multiply the independent clause selectivities together.  Now
@@ -2684,7 +2691,7 @@ get_initplan_cost(PlannerInfo *root, SubPlan *subplan)
  * seems OK to live with the approximation.
  */
 static Selectivity
-approx_selectivity(PlannerInfo *root, List *quals, JoinType jointype)
+approx_selectivity(PlannerInfo *root, List *quals, SpecialJoinInfo *sjinfo)
 {
 	Selectivity total = 1.0;
 	ListCell   *l;
@@ -2694,7 +2701,7 @@ approx_selectivity(PlannerInfo *root, List *quals, JoinType jointype)
 		Node	   *qual = (Node *) lfirst(l);
 
 		/* Note that clause_selectivity will be able to cache its result */
-		total *= clause_selectivity(root, qual, 0, jointype,
+		total *= clause_selectivity(root, qual, 0, sjinfo->jointype, sjinfo,
 									false /* use_damping */);
 	}
 	return total;
@@ -2727,6 +2734,7 @@ set_baserel_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 							   rel->baserestrictinfo,
 							   0,
 							   JOIN_INNER,
+							   NULL,
 							   gp_selectivity_damping_for_scans);
 
 	rel->rows = clamp_row_est(nrows);
@@ -2847,10 +2855,6 @@ adjust_selectivity_for_nulltest(Selectivity selec,
  * calculations for each pair of input rels that's encountered, and somehow
  * average the results?  Probably way more trouble than it's worth.)
  *
- * It's important that the results for symmetric JoinTypes be symmetric,
- * eg, (rel1, rel2, JOIN_LEFT) should produce the same result as (rel2,
- * rel1, JOIN_RIGHT).
- *
  * We set only the rows field here.  The width field was already set by
  * build_joinrel_tlist, and baserestrictcost is not used for join rels.
  */
@@ -2858,9 +2862,10 @@ void
 set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 						   RelOptInfo *outer_rel,
 						   RelOptInfo *inner_rel,
-						   JoinType jointype,
+						   SpecialJoinInfo *sjinfo,
 						   List *restrictlist)
 {
+	JoinType	jointype = sjinfo->jointype;
 	Selectivity jselec;
 	Selectivity pselec;
 	double		nrows;
@@ -2899,11 +2904,13 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 										joinquals,
 										0,
 										jointype,
+										sjinfo,
 										gp_selectivity_damping_for_joins);
 		pselec = clauselist_selectivity(root,
 										pushedquals,
 										0,
 										jointype,
+										sjinfo,
 										gp_selectivity_damping_for_joins);
 										
 		/* 
@@ -2928,6 +2935,7 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 										restrictlist,
 										0,
 										jointype,
+										sjinfo,
 										gp_selectivity_damping_for_joins);
 		pselec = 0.0;			/* not used, keep compiler quiet */
 	}
@@ -2952,12 +2960,6 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 				nrows = outer_rel->rows;
 			nrows *= pselec;
 			break;
-		case JOIN_RIGHT:
-			nrows = outer_rel->rows * inner_rel->rows * jselec;
-			if (nrows < inner_rel->rows)
-				nrows = inner_rel->rows;
-			nrows *= pselec;
-			break;
 		case JOIN_FULL:
 			nrows = outer_rel->rows * inner_rel->rows * jselec;
 			if (nrows < outer_rel->rows)
@@ -2966,12 +2968,13 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 				nrows = inner_rel->rows;
 			nrows *= pselec;
 			break;
-		case JOIN_LASJ:
+		case JOIN_ANTI:
 		case JOIN_LASJ_NOTIN:
 			nrows = outer_rel->rows * jselec;
 			Assert (0.0 == pselec);
 			break;
 		default:
+			/* other values not expected here */
 			elog(ERROR, "unrecognized join type: %d", (int) jointype);
 			nrows = 0;			/* keep compiler quiet */
 			break;
@@ -2996,10 +2999,11 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 
 /*
  * join_in_selectivity
- *	  Determines the factor by which a JOIN_IN join's result is expected
+ *	  Determines the factor by which a JOIN_SEMI join's result is expected
  *	  to be smaller than an ordinary inner join.
  *
  * 'path' is already filled in except for the cost fields
+ * 'sjinfo' must be the JOIN_SEMI SpecialJoinInfo for the join
  */
 static Selectivity
 join_in_selectivity(JoinPath *path, PlannerInfo *root)
@@ -3008,8 +3012,8 @@ join_in_selectivity(JoinPath *path, PlannerInfo *root)
 	Selectivity selec;
 	double		nrows;
 
-	/* Return 1.0 whenever it's not JOIN_IN */
-	if (path->jointype != JOIN_IN)
+	/* Return 1.0 whenever it's not JOIN_SEMI */
+	if (path->jointype != JOIN_SEMI)
 		return 1.0;
 
 	/*
@@ -3022,7 +3026,7 @@ join_in_selectivity(JoinPath *path, PlannerInfo *root)
 	if (IsA(path->innerjoinpath, UniquePath))
 		return 1.0;
 	innerrel = path->innerjoinpath->parent;
-    if (innerrel->onerow)
+	if (innerrel->onerow)
 		return 1.0;
 
 	/*
@@ -3035,12 +3039,13 @@ join_in_selectivity(JoinPath *path, PlannerInfo *root)
 								   path->joinrestrictinfo,
 								   0,
 								   JOIN_INNER,
+								   NULL,
 								   gp_selectivity_damping_for_joins);
 	nrows = path->outerjoinpath->parent->rows * innerrel->rows * selec;
 
 	nrows = clamp_row_est(nrows);
 
-	/* See if it's larger than the actual JOIN_IN size estimate */
+	/* See if it's larger than the actual JOIN_SEMI size estimate */
 	if (nrows > path->path.parent->rows)
 		return path->path.parent->rows / nrows;
 	else
@@ -3172,6 +3177,7 @@ set_cte_size_estimates(PlannerInfo *root, RelOptInfo *rel, Plan *cteplan)
 	set_baserel_size_estimates(root, rel);
 }
 
+
 /*
  * set_rel_width
  *		Set the estimated output width of a base relation.
@@ -3189,7 +3195,7 @@ void
 set_rel_width(PlannerInfo *root, RelOptInfo *rel)
 {
 	int32		tuple_width = 0;
-	ListCell   *tllist;
+	ListCell   *lc;
 	Oid			rel_reloid;
 
 	/*
@@ -3201,64 +3207,82 @@ set_rel_width(PlannerInfo *root, RelOptInfo *rel)
 	else
 		rel_reloid = InvalidOid;	/* probably can't happen */
 
-	foreach(tllist, rel->reltargetlist)
+	foreach(lc, rel->reltargetlist)
 	{
-		Var		   *var = (Var *) lfirst(tllist);
-		int			ndx;
-		Oid			var_reloid;
-		int32		item_width;
+		Node	   *node = (Node *) lfirst(lc);
 
-		/* For now, punt on whole-row child Vars */
-		if (!IsA(var, Var))
+		if (IsA(node, Var))
 		{
-			tuple_width += 32;	/* arbitrary */
-			continue;
-		}
+			Var		   *var = (Var *) node;
+			int			ndx;
+			Oid			var_reloid;
+			int32		item_width;
+			
+			Assert(var->varno == rel->relid);
+			/*
+			 * Postgres Upstream asserts for var->varattno >= rel->min_attr and
+			 * var->varattno <= rel->max_attr are not valid in GPDB since GPDB
+			 * also handles cases for virtual columns.
+			 */
 
-        /* Virtual column? */
-        if (var->varattno <= FirstLowInvalidHeapAttributeNumber)
-        {
-            CdbRelColumnInfo   *rci = cdb_find_pseudo_column(root, var);
-
-            tuple_width += rci->attr_width;
-            continue;
-        }
-
-		ndx = var->varattno - rel->min_attr;
-
-		/*
-		 * The width probably hasn't been cached yet, but may as well check
-		 */
-		if (rel->attr_widths[ndx] > 0)
-		{
-			tuple_width += rel->attr_widths[ndx];
-			continue;
-		}
-
-		if (var->varno == rel->relid)
-			var_reloid = rel_reloid;
-		else
-			var_reloid = getrelid(var->varno, root->parse->rtable);
-
-		if (var_reloid != InvalidOid)
-		{
-			item_width = get_attavgwidth(var_reloid, var->varattno);
-			if (item_width > 0)
+			/* Virtual column? */
+			if (var->varattno <= FirstLowInvalidHeapAttributeNumber)
 			{
-				rel->attr_widths[ndx] = item_width;
-				tuple_width += item_width;
+				CdbRelColumnInfo   *rci = cdb_find_pseudo_column(root, var);
+				
+				tuple_width += rci->attr_width;
 				continue;
 			}
+
+			ndx = var->varattno - rel->min_attr;
+			
+			/*
+			 * The width probably hasn't been cached yet, but may as well check
+			 */
+			if (rel->attr_widths[ndx] > 0)
+			{
+				tuple_width += rel->attr_widths[ndx];
+				continue;
+			}
+			
+			if (var->varno == rel->relid)
+				var_reloid = rel_reloid;
+			else
+				var_reloid = getrelid(var->varno, root->parse->rtable);
+			
+			if (var_reloid != InvalidOid)
+			{
+				item_width = get_attavgwidth(var_reloid, var->varattno);
+				if (item_width > 0)
+				{
+					rel->attr_widths[ndx] = item_width;
+					tuple_width += item_width;
+					continue;
+				}
+			}
+			
+			/*
+			 * Not a plain relation, or can't find statistics for it. Estimate
+			 * using just the type info.
+			 */
+			item_width = get_typavgwidth(var->vartype, var->vartypmod);
+			Assert(item_width > 0);
+			rel->attr_widths[ndx] = item_width;
+			tuple_width += item_width;
+		}
+		else if (IsA(node, PlaceHolderVar))
+		{
+			PlaceHolderVar *phv = (PlaceHolderVar *) node;
+			PlaceHolderInfo *phinfo = find_placeholder_info(root, phv);
+			
+			tuple_width += phinfo->ph_width;
+		}
+		else
+		{
+			/* For now, punt on whole-row child Vars */
+			tuple_width += 32;	/* arbitrary */
 		}
 
-		/*
-		 * Not a plain relation, or can't find statistics for it. Estimate
-		 * using just the type info.
-		 */
-		item_width = get_typavgwidth(var->vartype, var->vartypmod);
-		Assert(item_width > 0);
-		rel->attr_widths[ndx] = item_width;
-		tuple_width += item_width;
 	}
 	Assert(tuple_width >= 0);
 	rel->width = tuple_width;

@@ -126,6 +126,10 @@ namespace gpdxl
 			static
 			const CWStringConst *PstrSystemColName(AttrNumber attno);
 
+			// returns the length for the system column with given attno number
+			static
+			const ULONG UlSystemColLength(AttrNumber attno);
+
 			// translate the join type from its GPDB representation into the DXL one
 			static
 			EdxlJoinType EdxljtFromJoinType(JoinType jt);
@@ -212,14 +216,6 @@ namespace gpdxl
 			static
 			EdxlSetOpType Edxlsetop(SetOperation setop, BOOL fAll);
 
-			// return the GPDB frame exclusion strategy from its corresponding DXL representation
-			static
-			WindowExclusion Windowexclusion(EdxlFrameExclusionStrategy edxlfes);
-
-			// return the GPDB frame boundary kind from its corresponding DXL representation
-			static
-			WindowBoundingKind Windowboundkind(EdxlFrameBoundary edxlfb);
-
 			// construct a dynamic array of sets of column attnos corresponding
 			// to the group by clause
 			static
@@ -295,9 +291,9 @@ namespace gpdxl
 			static
 			BOOL FWindowSpec(Node *pnode, List *plWindowClause, List *plTargetList);
 
-			// create a scalar const value expression for the given int4 value
+			// create a scalar const value expression for the given int8 value
 			static
-			CDXLNode *PdxlnInt4Const(IMemoryPool *pmp, CMDAccessor *pmda, INT iVal);
+			CDXLNode *PdxlnInt8Const(IMemoryPool *pmp, CMDAccessor *pmda, INT iVal);
 
 			// check to see if the target list entry is a grouping column
 			static

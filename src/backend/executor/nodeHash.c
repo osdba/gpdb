@@ -4,6 +4,7 @@
  *	  Routines to hash relations for hashjoin
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -146,6 +147,7 @@ MultiExecHash(HashState *node)
 			}
 		}
 	}
+	MemoryAccounting_DeclareDone();
 
 	/* Now we have set up all the initial batches & primary overflow batches. */
 	hashtable->nbatch_outstart = hashtable->nbatch;
@@ -326,6 +328,7 @@ ExecHashTableCreate(HashState *hashState, HashJoinState *hjstate, List *hashOper
 	hashtable->stats = NULL;
 	hashtable->eagerlyReleased = false;
 	hashtable->hjstate = hjstate;
+	hashtable->first_pass = true;
 
 	/*
 	 * Get info about the hash functions to be used for each hash key. Also
@@ -733,6 +736,9 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 	if (oldnbatch > Min(INT_MAX / 2, MaxAllocSize / (sizeof(void *) * 2)))
 		return;
 
+	/* A reusable hash table can only respill during first pass */
+	AssertImply(hashtable->hjstate->reuse_hashtable, hashtable->first_pass);
+
 	nbatch = oldnbatch * 2;
 	Assert(nbatch > 1);
 
@@ -924,8 +930,12 @@ ExecHashTableReallocBatchData(HashJoinTable hashtable, int new_nbatch)
  * tuples from batch files.  We could save some cycles in the regular-tuple
  * case by not forcing the slot contents into minimal form; not clear if it's
  * worth the messiness required.
+ *
+ * Returns true if the tuple belonged to this batch and was inserted to
+ * the in-memory hash table, or false if it belonged to a later batch and
+ * was pushed to a temp file.
  */
-void
+bool
 ExecHashTableInsert(HashState *hashState, HashJoinTable hashtable,
 					TupleTableSlot *slot,
 					uint32 hashvalue)
@@ -1001,6 +1011,8 @@ ExecHashTableInsert(HashState *hashState, HashJoinTable hashtable,
 	}
 	}
 	END_MEMORY_ACCOUNT();
+
+	return (batchno == hashtable->curbatch);
 }
 
 /*
@@ -1574,7 +1586,7 @@ ExecHashTableExplainBatchEnd(HashState *hashState, HashJoinTable hashtable)
 
     /* Already reported on this batch? */
     if ( stats->endedbatch == curbatch 
-			|| curbatch >= hashtable->nbatch)
+			|| curbatch >= hashtable->nbatch || !hashtable->first_pass)
         return;
     stats->endedbatch = curbatch;
 

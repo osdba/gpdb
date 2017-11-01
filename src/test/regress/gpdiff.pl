@@ -1,6 +1,8 @@
 #!/usr/bin/env perl
 #
-# Copyright (c) 2007, 2008, 2009 GreenPlum.  All rights reserved.
+# Portions Copyright (c) 2007, 2008, 2009 GreenPlum.  All rights reserved.
+# Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+#
 # Author: Jeffrey I Cohen
 #
 # Pod::Usage is loaded lazily when needed, if the --help or other such option
@@ -11,9 +13,7 @@
 
 use strict;
 use warnings;
-use POSIX;
 use File::Spec;
-use Config;
 use Getopt::Long qw(GetOptions);
 Getopt::Long::Configure qw(pass_through);
 
@@ -21,6 +21,7 @@ Getopt::Long::Configure qw(pass_through);
 use FindBin;
 use lib "$FindBin::Bin";
 use atmsort;
+use GPTest qw(print_version);
 
 =head1 NAME
 
@@ -123,7 +124,8 @@ potential erroneous comparison.
 
 Jeffrey I Cohen
 
-Copyright (c) 2007, 2008, 2009 GreenPlum.  All rights reserved.
+Portions Copyright (c) 2007, 2008, 2009 GreenPlum.  All rights reserved.
+Portions Copyright (c) 2012-Present Pivotal Software, Inc.
 
 Address bug reports and comments to: bugs@greenplum.org
 
@@ -138,28 +140,9 @@ sub lazy_pod2usage
 }
 
 my %glob_atmsort_args;
-# need gnu diff on solaris
-our $ATMDIFF = ($Config{'osname'} =~ m/solaris|sunos/) ? 'gdiff' : 'diff';
 
 my $glob_ignore_plans;
 my $glob_init_file = [];
-
-sub print_version
-{
-    my $VERSION = do { my @r = ('4.3.99.00' =~ /\d+/g); sprintf "%d."."%02d" x $#r, @r }; # must be all one line, for MakeMaker
-
-    my $whichdiff = `which $ATMDIFF`;
-    chomp $whichdiff;
-    print "$0 version $VERSION\n";
-    print "Type \'gpdiff.pl --help\' for more information on the standard options\n";
-    print "$0 calls the \"", $whichdiff, "\" utility:\n\n";
-
-    my $outi = `$ATMDIFF -v`;
-    $outi =~ s/^/   /gm;
-    print $outi, "\n";
-
-    exit(1);
-}
 
 sub gpdiff_files
 {
@@ -189,20 +172,17 @@ sub gpdiff_files
 
 #   print "args: $args\n";
 
-    my $outi =`$ATMDIFF $args`;
+    my $outi =`diff $args`;
 
     my $stat = $? >> 8; # diff status
 
     unless (defined($d2d) && exists($d2d->{equiv}))
     {
-        # check for start_equiv unless already doing equiv check
-
-        # get the count of matching lines
-        my $grepout = `grep -c start_equiv $f1`;
-        chomp $grepout;
-
-        $need_equiv = $grepout;
-#        $need_equiv = 0;
+        # check if the file contains any "start_equiv" directives, unless
+        # already doing equiv check
+        open(FILE, $f1);
+        $need_equiv = (grep{/start_equiv/} <FILE>);
+        close FILE;
 
         if ($need_equiv)
         {
@@ -217,11 +197,11 @@ sub gpdiff_files
     {
         if (exists($d2d->{equiv}))
         {
-            $outi = "$ATMDIFF $f1 $f2" . ".equiv\n" . $outi;
+            $outi = "diff $f1 $f2" . ".equiv\n" . $outi;
         }
         else
         {
-            $outi = "$ATMDIFF $f1 $f2\n" . $outi;
+            $outi = "diff $f1 $f2\n" . $outi;
         }
     }
 

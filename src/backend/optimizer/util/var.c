@@ -4,19 +4,27 @@
  *	  Var node manipulation routines
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ * Note: for most purposes, PlaceHolderVar is considered a Var too,
+ * even if its contained expression is variable-free.  Also, CurrentOfExpr
+ * is treated as a Var for purposes of determining whether an expression
+ * contains variables.
+ *
+ *
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/util/var.c,v 1.73.2.1 2010/07/08 00:14:16 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/util/var.c,v 1.84 2009/02/25 03:30:37 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/htup.h"
-#include "optimizer/clauses.h"
+#include "nodes/nodeFuncs.h"
+#include "optimizer/walkers.h"
 #include "optimizer/prep.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
@@ -49,7 +57,7 @@ typedef struct
 typedef struct
 {
 	List	   *varlist;
-	bool		includeUpperVars;
+	bool		includePlaceHolderVars;
 } pull_var_clause_context;
 
 typedef struct
@@ -66,6 +74,7 @@ static bool contain_var_clause_walker(Node *node, void *context);
 static bool contain_vars_of_level_walker(Node *node, int *sublevels_up);
 static bool locate_var_of_level_walker(Node *node,
 						   locate_var_of_level_context *context);
+static inline Relids pull_varnos_of_level(Node *node, int levelsup);
 static bool pull_var_clause_walker(Node *node,
 					   pull_var_clause_context *context);
 static Node *flatten_join_alias_vars_mutator(Node *node,
@@ -86,6 +95,7 @@ typedef struct Cdb_walk_vars_context
     Cdb_walk_vars_callback_Var      	callback_var;
     Cdb_walk_vars_callback_Aggref   	callback_aggref;
     Cdb_walk_vars_callback_CurrentOf    callback_currentof;
+    Cdb_walk_vars_callback_placeholdervar callback_placeholdervar;
     void                           	   *context;
     int                             	sublevelsup;
 } Cdb_walk_vars_context;
@@ -109,7 +119,11 @@ cdb_walk_vars_walker(Node *node, void *wvwcontext)
     if (IsA(node, CurrentOfExpr) &&
         ctx->callback_currentof != NULL)
         return ctx->callback_currentof((CurrentOfExpr *)node, ctx->context, ctx->sublevelsup);
-
+	
+    if (IsA(node, PlaceHolderVar) &&
+        ctx->callback_placeholdervar != NULL)
+        return ctx->callback_placeholdervar((PlaceHolderVar *)node, ctx->context, ctx->sublevelsup);
+	
     if (IsA(node, Query))
 	{
 		bool    b;
@@ -128,6 +142,7 @@ cdb_walk_vars(Node                         *node,
               Cdb_walk_vars_callback_Var    callback_var,
               Cdb_walk_vars_callback_Aggref callback_aggref,
               Cdb_walk_vars_callback_CurrentOf callback_currentof,
+              Cdb_walk_vars_callback_placeholdervar callback_placeholdervar,
               void                         *context,
               int                           levelsup)
 {
@@ -136,6 +151,7 @@ cdb_walk_vars(Node                         *node,
     ctx.callback_var = callback_var;
     ctx.callback_aggref = callback_aggref;
     ctx.callback_currentof = callback_currentof;
+    ctx.callback_placeholdervar = callback_placeholdervar;
     ctx.context = context;
     ctx.sublevelsup = levelsup;
 
@@ -146,6 +162,27 @@ cdb_walk_vars(Node                         *node,
 	return query_or_expression_tree_walker(node, cdb_walk_vars_walker, &ctx, 0);
 }                               /* cdb_walk_vars */
 
+static bool
+pull_varnos_cbPlaceHolderVar(PlaceHolderVar *phv, void *context, int sublevelsup)
+{
+	
+	/*
+	 * Normally, we can just take the varnos in the contained expression.
+	 * But if it is variable-free, use the PHV's syntactic relids.
+	 */
+
+	Relids all_varnos;
+	pull_varnos_context *pcontext = (pull_varnos_context *) context;
+	
+	all_varnos = pull_varnos_of_level((Node*) phv->phexpr, sublevelsup);
+	
+	if (bms_is_empty(all_varnos) &&
+		phv->phlevelsup == sublevelsup)
+		pcontext->varnos = bms_add_members(pcontext->varnos, phv->phrels);
+	else
+		pcontext->varnos = bms_join(pcontext->varnos, all_varnos);
+	return false;
+}
 
 /*
  * pull_varnos
@@ -182,7 +219,7 @@ pull_varnos_of_level(Node *node, int levelsup)      /*CDB*/
 	pull_varnos_context context;
 
 	context.varnos = NULL;
-    cdb_walk_vars(node, pull_varnos_cbVar, NULL, pull_varnos_cbCurrentOf, &context, levelsup);
+    cdb_walk_vars(node, pull_varnos_cbVar, NULL, pull_varnos_cbCurrentOf, pull_varnos_cbPlaceHolderVar, &context, levelsup);
 	return context.varnos;
 }                               /* pull_varnos_of_level */
 
@@ -227,7 +264,7 @@ pull_varattnos_walker(Node *node, Bitmapset **varattnos)
 	}
 	/* Should not find a subquery or subplan */
 	Assert(!IsA(node, Query));
-	Assert(!is_subplan(node));
+	Assert(!IsA(node, SubPlan));
 
 	return expression_tree_walker(node, pull_varattnos_walker,
 								  (void *) varattnos);
@@ -267,7 +304,7 @@ contain_var_reference(Node *node, int varno, int varattno, int levelsup)
 	context.varno = varno;
 	context.varattno = varattno;
 
-	return cdb_walk_vars(node, contain_var_reference_cbVar, NULL, NULL, &context, levelsup);
+	return cdb_walk_vars(node, contain_var_reference_cbVar, NULL, NULL, NULL, &context, levelsup);
 }
 
 bool
@@ -318,6 +355,12 @@ contain_var_clause_walker(Node *node, void *context)
 	}
 	if (IsA(node, CurrentOfExpr))
 		return true;
+	if (IsA(node, PlaceHolderVar))
+	{
+		if (((PlaceHolderVar *) node)->phlevelsup == 0)
+			return true;		/* abort the tree traversal and return true */
+		/* else fall through to check the contained expr */
+	}
 	return expression_tree_walker(node, contain_var_clause_walker, context);
 }
 
@@ -357,6 +400,12 @@ contain_vars_of_level_walker(Node *node, int *sublevels_up)
 		if (*sublevels_up == 0)
 			return true;
 		return false;
+	}
+	if (IsA(node, PlaceHolderVar))
+	{
+		if (((PlaceHolderVar *) node)->phlevelsup == *sublevels_up)
+			return true;		/* abort the tree traversal and return true */
+		/* else fall through to check the contained expr */
 	}
 	if (IsA(node, Query))
 	{
@@ -477,9 +526,26 @@ contain_vars_of_level_or_above_cbAggref(Aggref *aggref, void *unused, int sublev
 	return cdb_walk_vars((Node *)aggref->args,
                          contain_vars_of_level_or_above_cbVar,
                          contain_vars_of_level_or_above_cbAggref,
+						 NULL,
                          NULL,
-                         NULL,
+                         NULL, // GPDB_84_MERGE_FIXME: Can arguments of Aggref contain PlaceHolderVars ?
                          sublevelsup);
+}
+
+bool
+contain_vars_of_level_or_above_cbPlaceHolderVar(PlaceHolderVar *placeholdervar, void *unused, int sublevelsup)
+{
+	if(placeholdervar->phlevelsup >= sublevelsup)
+		return true;
+
+	/* visit placeholder's contained expression */
+	return cdb_walk_vars((Node*)placeholdervar->phexpr,
+						 contain_vars_of_level_or_above_cbVar,
+						 contain_vars_of_level_or_above_cbAggref,
+						 NULL,
+						 contain_vars_of_level_or_above_cbPlaceHolderVar,
+						 NULL,
+						 sublevelsup);
 }
 
 bool
@@ -488,11 +554,11 @@ contain_vars_of_level_or_above(Node *node, int levelsup)
 	return cdb_walk_vars(node,
                          contain_vars_of_level_or_above_cbVar,
                          contain_vars_of_level_or_above_cbAggref,
-                         NULL,
+						 NULL,
+                         contain_vars_of_level_or_above_cbPlaceHolderVar,
                          NULL,
                          levelsup);
 }
-
 
 /*
  * find_minimum_var_level
@@ -569,12 +635,59 @@ find_minimum_var_level_cbAggref(Aggref *aggref,
 	}
 
     /* visit aggregate's args */
-	return cdb_walk_vars((Node *)aggref->args,
-                         find_minimum_var_level_cbVar,
-                         find_minimum_var_level_cbAggref,
-                         NULL,
-                         ctx,
-                         sublevelsup);
+	if (cdb_walk_vars((Node *)aggref->args,
+					  find_minimum_var_level_cbVar,
+					  find_minimum_var_level_cbAggref,
+					  NULL,
+					  NULL,
+					  ctx,
+					  sublevelsup))
+		return true;
+	if (cdb_walk_vars((Node *)aggref->aggfilter,
+					  find_minimum_var_level_cbVar,
+					  find_minimum_var_level_cbAggref,
+					  NULL,
+					  NULL,
+					  ctx,
+					  sublevelsup))
+		return true;
+	return false;
+}
+
+static bool
+find_minimum_var_level_cbPlaceHolderVar(PlaceHolderVar   *placeholdervar,
+										void  *context,
+										int    sublevelsup)
+{
+	int			phlevelsup = placeholdervar->phlevelsup;
+
+	/* convert levelsup to frame of reference of original query */
+	phlevelsup -= sublevelsup;
+	/* ignore local vars of subqueries */
+	find_minimum_var_level_context *ctx = (find_minimum_var_level_context *) context;
+	if (phlevelsup >= 0)
+	{
+		if (ctx->min_varlevel < 0 ||
+			ctx->min_varlevel > phlevelsup)
+		{
+			ctx->min_varlevel = phlevelsup;
+
+			/*
+			 * As soon as we find a local variable, we can abort the tree
+			 * traversal, since min_varlevel is then certainly 0.
+			 */
+			if (phlevelsup == 0)
+				return true;
+		}
+	}
+	/* visit the contained expression */
+	return cdb_walk_vars((Node *) placeholdervar->phexpr,
+						 find_minimum_var_level_cbVar,
+						 find_minimum_var_level_cbAggref,
+						 NULL,  // GPDB_84_MERGE_FIXME: Can PlaceHolder expression have CurrentOf ?
+						 find_minimum_var_level_cbPlaceHolderVar,
+						 ctx,
+						 sublevelsup);
 }
 
 int
@@ -587,7 +700,8 @@ find_minimum_var_level(Node *node)
 	cdb_walk_vars(node,
                   find_minimum_var_level_cbVar,
                   find_minimum_var_level_cbAggref,
-                  NULL,
+				  NULL,
+                  find_minimum_var_level_cbPlaceHolderVar,
                   &context,
                   0);
 
@@ -597,25 +711,30 @@ find_minimum_var_level(Node *node)
 
 /*
  * pull_var_clause
- *	  Recursively pulls all var nodes from an expression clause.
+ *	  Recursively pulls all Var nodes from an expression clause.
  *
- *	  Upper-level vars (with varlevelsup > 0) are included only
- *	  if includeUpperVars is true.	Most callers probably want
- *	  to ignore upper-level vars.
+ *	  PlaceHolderVars are included too, if includePlaceHolderVars is true.
+ *	  If it isn't true, an error is thrown if any are found.
+ *	  Note that Vars within a PHV's expression are *not* included.
  *
- *	  Returns list of varnodes found.  Note the varnodes themselves are not
+ *	  CurrentOfExpr nodes are *not* included.
+ *
+ *	  Upper-level vars (with varlevelsup > 0) are not included.
+ *	  (These probably represent errors too, but we don't complain.)
+ *
+ *	  Returns list of nodes found.  Note the nodes themselves are not
  *	  copied, only referenced.
  *
  * Does not examine subqueries, therefore must only be used after reduction
  * of sublinks to subplans!
  */
 List *
-pull_var_clause(Node *node, bool includeUpperVars)
+pull_var_clause(Node *node, bool includePlaceHolderVars)
 {
 	pull_var_clause_context context;
 
 	context.varlist = NIL;
-	context.includeUpperVars = includeUpperVars;
+	context.includePlaceHolderVars = includePlaceHolderVars;
 
 	pull_var_clause_walker(node, &context);
 	return context.varlist;
@@ -628,8 +747,17 @@ pull_var_clause_walker(Node *node, pull_var_clause_context *context)
 		return false;
 	if (IsA(node, Var))
 	{
-		if (((Var *) node)->varlevelsup == 0 || context->includeUpperVars)
+		if (((Var *) node)->varlevelsup == 0)
 			context->varlist = lappend(context->varlist, node);
+		return false;
+	}
+	if (IsA(node, PlaceHolderVar))
+	{
+		if (!context->includePlaceHolderVars)
+			elog(ERROR, "PlaceHolderVar found where not expected");
+		if (((PlaceHolderVar *) node)->phlevelsup == 0)
+			context->varlist = lappend(context->varlist, node);
+		/* we do NOT descend into the contained expression */
 		return false;
 	}
 	return expression_tree_walker(node, pull_var_clause_walker,
@@ -653,6 +781,9 @@ pull_var_clause_walker(Node *node, pull_var_clause_context *context)
  * Query.hasSubLinks fields get set to TRUE if so.  If there are any
  * SubLinks in the join alias lists, the outer Query should already have
  * hasSubLinks = TRUE, so this is only relevant to un-flattened subqueries.
+ *
+ * This also adjusts relid sets found in some expression node types to
+ * substitute the contained base rels for any join relid.
  *
  * NOTE: this is used on not-yet-planned expressions.  We do not expect it
  * to be applied directly to a Query node.
@@ -752,20 +883,23 @@ flatten_join_alias_vars_mutator(Node *node,
 
 		return newvar;
 	}
-	if (IsA(node, InClauseInfo))
+	if (IsA(node, PlaceHolderVar))
 	{
-		/* Copy the InClauseInfo node with correct mutation of subnodes */
-		InClauseInfo *ininfo;
-
-		ininfo = (InClauseInfo *) expression_tree_mutator(node,
-											 flatten_join_alias_vars_mutator,
-														  (void *) context);
-		/* now fix InClauseInfo's relid sets */
-		if (context->sublevels_up == 0)
-			ininfo->righthand = alias_relid_set(context->root,
-												ininfo->righthand);
-		return (Node *) ininfo;
+		/* Copy the PlaceHolderVar node with correct mutation of subnodes */
+		PlaceHolderVar *phv;
+		
+		phv = (PlaceHolderVar *) expression_tree_mutator(node,
+														 flatten_join_alias_vars_mutator,
+														 (void *) context);
+		/* now fix PlaceHolderVar's relid sets */
+		if (phv->phlevelsup == context->sublevels_up)
+		{
+			phv->phrels = alias_relid_set(context->root,
+										  phv->phrels);
+		}
+		return (Node *) phv;
 	}
+
 	if (IsA(node, Query))
 	{
 		/* Recurse into RTE subquery or not-yet-planned sublink subquery */
@@ -785,7 +919,10 @@ flatten_join_alias_vars_mutator(Node *node,
 		return (Node *) newnode;
 	}
 	/* Already-planned tree not supported */
-	Assert(!is_subplan(node));
+	Assert(!IsA(node, SubPlan));
+	/* Shouldn't need to handle these planner auxiliary nodes here */
+	Assert(!IsA(node, SpecialJoinInfo));
+	Assert(!IsA(node, PlaceHolderInfo));
 
 	return expression_tree_mutator(node, flatten_join_alias_vars_mutator,
 								   (void *) context);
@@ -801,12 +938,12 @@ alias_relid_set(PlannerInfo *root, Relids relids)
 	Relids		result = NULL;
 	Relids		tmprelids;
 	int			rtindex;
-
+	
 	tmprelids = bms_copy(relids);
 	while ((rtindex = bms_first_member(tmprelids)) >= 0)
 	{
 		RangeTblEntry *rte = rt_fetch(rtindex, root->parse->rtable);
-
+		
 		if (rte->rtekind == RTE_JOIN)
 			result = bms_join(result, get_relids_for_join(root, rtindex));
 		else

@@ -38,12 +38,13 @@
  *
  *
  * Portions Copyright (c) 2005-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/error/elog.c,v 1.201.2.5 2010/05/08 16:40:14 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/error/elog.c,v 1.203 2008/03/24 18:08:47 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -1081,31 +1082,6 @@ errdetail(const char *fmt,...)
 
 
 /*
- * errdetail_log --- add a detail_log error message text to the current error
- */
-int
-errdetail_log(const char *fmt,...)
-{
-	ErrorData  *edata = &errordata[errordata_stack_depth];
-	MemoryContext oldcontext;
-
-	recursion_depth++;
-	CHECK_STACK_DEPTH();
-	oldcontext = MemoryContextSwitchTo(ErrorContext);
-
-	EVALUATE_MESSAGE(detail_log, false, true);
-
-	/* enforce correct encoding */
-	verify_and_replace_mbstr(&(edata->detail_log), strlen(edata->detail_log));
-
-	MemoryContextSwitchTo(oldcontext);
-	recursion_depth--;
-	errno = edata->saved_errno; /*CDB*/
-	return 0;					/* return value does not matter */
-}
-
-
-/*
  * errdetail_plural --- add a detail error message text to the current error,
  * with support for pluralization of the message text
  */
@@ -1124,6 +1100,31 @@ errdetail_plural(const char *fmt_singular, const char *fmt_plural,
 
 	/* enforce correct encoding */
 	verify_and_replace_mbstr(&(edata->detail), strlen(edata->detail));
+
+	MemoryContextSwitchTo(oldcontext);
+	recursion_depth--;
+	errno = edata->saved_errno; /*CDB*/
+	return 0;					/* return value does not matter */
+}
+
+
+/*
+ * errdetail_log --- add a detail_log error message text to the current error
+ */
+int
+errdetail_log(const char *fmt,...)
+{
+	ErrorData  *edata = &errordata[errordata_stack_depth];
+	MemoryContext oldcontext;
+
+	recursion_depth++;
+	CHECK_STACK_DEPTH();
+	oldcontext = MemoryContextSwitchTo(ErrorContext);
+
+	EVALUATE_MESSAGE(detail_log, false, true);
+
+	/* enforce correct encoding */
+	verify_and_replace_mbstr(&(edata->detail_log), strlen(edata->detail_log));
 
 	MemoryContextSwitchTo(oldcontext);
 	recursion_depth--;
@@ -1746,12 +1747,16 @@ pg_re_throw(void)
 bool
 elog_demote(int downgrade_to_elevel)
 {
-	ErrorData  *edata = &errordata[errordata_stack_depth];
+	ErrorData  *edata;
+
+	if (errordata_stack_depth < 0 ||
+		errordata_stack_depth >= ERRORDATA_STACK_SIZE - 1)
+		return false;
+
+	edata = &errordata[errordata_stack_depth];
 
 	if (downgrade_to_elevel >= ERROR ||
 		recursion_depth != 0 ||
-		errordata_stack_depth < 0 ||
-		errordata_stack_depth >= ERRORDATA_STACK_SIZE - 1 ||
 		edata->elevel > ERROR ||
 		edata->elevel < downgrade_to_elevel)
 		return false;
@@ -1782,14 +1787,18 @@ elog_demote(int downgrade_to_elevel)
 bool
 elog_dismiss(int downgrade_to_elevel)
 {
-	ErrorContextCallback *saveCallbackStack = error_context_stack;
-	ErrorData  *edata = &errordata[errordata_stack_depth];
-	bool		shouldEmit = false;
+	ErrorContextCallback   *saveCallbackStack = error_context_stack;
+	ErrorData			   *edata;
+	bool					shouldEmit = false;
+
+	if (errordata_stack_depth < 0 ||
+		errordata_stack_depth >= ERRORDATA_STACK_SIZE - 1)
+		return false;
+
+	edata = &errordata[errordata_stack_depth];
 
 	if (downgrade_to_elevel >= ERROR ||
 		recursion_depth != 0 ||
-		errordata_stack_depth < 0 ||
-		errordata_stack_depth >= ERRORDATA_STACK_SIZE - 1 ||
 		edata->elevel > ERROR)
 		return false;
 
@@ -1866,7 +1875,7 @@ elog_getelevel(void)
 
 /*
  * Note: A pointer is returned.  Make a copy of the message
- * before re-throwing or flusing the error state.
+ * before re-throwing or flushing the error state.
  */
 char*
 elog_message(void)
@@ -2722,8 +2731,11 @@ write_csvlog(ErrorData *edata)
 	appendCSVLiteral(&buf, edata->message);
 	appendStringInfoCharMacro(&buf, ',');
 
-	/* errdetail */
-	appendCSVLiteral(&buf, edata->detail);
+	/* errdetail or errdetail_log */
+	if (edata->detail_log)
+		appendCSVLiteral(&buf, edata->detail_log);
+	else
+		appendCSVLiteral(&buf, edata->detail);
 	appendStringInfoCharMacro(&buf, ',');
 
 	/* errhint */
@@ -3572,7 +3584,14 @@ send_message_to_server_log(ErrorData *edata)
 
 	if (Log_error_verbosity >= PGERROR_DEFAULT)
 	{
-		if (edata->detail)
+		if (edata->detail_log)
+		{
+			log_line_prefix(&buf);
+			appendStringInfoString(&buf, _("DETAIL:  "));
+			append_with_tabs(&buf, edata->detail_log);
+			appendStringInfoChar(&buf, '\n');
+		}
+		else if (edata->detail)
 		{
 			appendBinaryStringInfo(&buf, prefix.data, prefix.len);
 			appendStringInfoString(&buf, _("DETAIL:  "));

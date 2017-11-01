@@ -8,6 +8,7 @@
  *	 processing.
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -324,8 +325,14 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			break;
 
 		case T_RecursiveUnion:
+			curMemoryAccountId = CREATE_EXECUTOR_MEMORY_ACCOUNT(isAlienPlanNode, node, Sequence);
+
+			START_MEMORY_ACCOUNT(curMemoryAccountId);
+			{
 			result = (PlanState *) ExecInitRecursiveUnion((RecursiveUnion *) node,
 														  estate, eflags);
+			}
+			END_MEMORY_ACCOUNT();
 			break;
 
 		case T_BitmapAnd:
@@ -541,13 +548,25 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			break;
 
 		case T_CteScan:
+			curMemoryAccountId = CREATE_EXECUTOR_MEMORY_ACCOUNT(isAlienPlanNode, node, CteScan);
+
+			START_MEMORY_ACCOUNT(curMemoryAccountId);
+			{
 			result = (PlanState *) ExecInitCteScan((CteScan *) node,
 												   estate, eflags);
+			}
+			END_MEMORY_ACCOUNT();
 			break;
 
 		case T_WorkTableScan:
+			curMemoryAccountId = CREATE_EXECUTOR_MEMORY_ACCOUNT(isAlienPlanNode, node, WorkTableScan);
+
+			START_MEMORY_ACCOUNT(curMemoryAccountId);
+			{
 			result = (PlanState *) ExecInitWorkTableScan((WorkTableScan *) node,
 														 estate, eflags);
+			}
+			END_MEMORY_ACCOUNT();
 			break;
 
 			/*
@@ -651,12 +670,12 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			END_MEMORY_ACCOUNT();
 			break;
 
-		case T_Window:
-			curMemoryAccountId = CREATE_EXECUTOR_MEMORY_ACCOUNT(isAlienPlanNode, node, Window);
+		case T_WindowAgg:
+			curMemoryAccountId = CREATE_EXECUTOR_MEMORY_ACCOUNT(isAlienPlanNode, node, WindowAgg);
 
 			START_MEMORY_ACCOUNT(curMemoryAccountId);
 			{
-			result = (PlanState *) ExecInitWindow((Window *) node,
+			result = (PlanState *) ExecInitWindow((WindowAgg *) node,
 											   estate, eflags);
 			}
 			END_MEMORY_ACCOUNT();
@@ -1005,8 +1024,8 @@ ExecProcNode(PlanState *node)
 	ExecCdbTraceNode(node, true, NULL);
 #endif   /* CDB_TRACE_EXECUTOR */
 
-	if(node->plan)
-		PG_TRACE5(execprocnode__enter, Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id, node->plan->plan_parent_node_id);
+	if (node->plan)
+		TRACE_POSTGRESQL_EXECPROCNODE_ENTER(Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id);
 
 	if (node->chgParam != NULL) /* something changed */
 		ExecReScan(node, NULL); /* let ReScan handle this */
@@ -1199,7 +1218,7 @@ ExecProcNode(PlanState *node)
 		InstrStopNode(node->instrument, TupIsNull(result) ? 0.0 : 1.0);
 
 	if (node->plan)
-		PG_TRACE5(execprocnode__exit, Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id, node->plan->plan_parent_node_id);
+		TRACE_POSTGRESQL_EXECPROCNODE_EXIT(Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id);
 
 #ifdef CDB_TRACE_EXECUTOR
 	ExecCdbTraceNode(node, false, result);
@@ -1261,8 +1280,7 @@ MultiExecProcNode(PlanState *node)
 
 	START_MEMORY_ACCOUNT(node->plan->memoryAccountId);
 {
-	PG_TRACE5(execprocnode__enter, Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id,
-			  node->plan->plan_parent_node_id);
+	TRACE_POSTGRESQL_EXECPROCNODE_ENTER(Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id);
 
 	if (node->chgParam != NULL) /* something changed */
 		ExecReScan(node, NULL); /* let ReScan handle this */
@@ -1295,8 +1313,7 @@ MultiExecProcNode(PlanState *node)
 			break;
 	}
 
-	PG_TRACE5(execprocnode__exit, Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id,
-			  node->plan->plan_parent_node_id);
+	TRACE_POSTGRESQL_EXECPROCNODE_EXIT(Gp_segment, currentSliceId, nodeTag(node), node->plan->plan_node_id);
 }
 	END_MEMORY_ACCOUNT();
 	return result;
@@ -1422,8 +1439,8 @@ ExecCountSlotsNode(Plan *node)
 		case T_Agg:
 			return ExecCountSlotsAgg((Agg *) node);
 
-		case T_Window:
-			return ExecCountSlotsWindow((Window *) node);
+		case T_WindowAgg:
+			return ExecCountSlotsWindow((WindowAgg *) node);
 
 		case T_Unique:
 			return ExecCountSlotsUnique((Unique *) node);

@@ -3,7 +3,8 @@
  * resgroupcmds.h
  *	  Commands for manipulating resource group.
  *
- * Copyright (c) 2006-2017, Greenplum inc.
+ * Portions Copyright (c) 2006-2017, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  *
  * IDENTIFICATION
  * 		src/include/commands/resgroupcmds.h
@@ -15,6 +16,8 @@
 
 #include "nodes/parsenodes.h"
 #include "utils/resgroup.h"
+
+#define RESGROUP_MAX_MEMORY_LIMIT	(100)
 
 extern void CreateResourceGroup(CreateResourceGroupStmt *stmt);
 extern void DropResourceGroup(DropResourceGroupStmt *stmt);

@@ -6,6 +6,11 @@
  * Portions Copyright (c) 1996-2006, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  * Portions Copyright (c) 2008-2009, Greenplum Inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/access/appendonly/appendonlyam.c
  *
  *
  * INTERFACE ROUTINES
@@ -1643,8 +1648,6 @@ appendonly_beginrangescan_internal(Relation relation,
 
 	StringInfoData titleBuf;
 
-	ValidateAppendOnlyMetaDataSnapshot(&appendOnlyMetaDataSnapshot);
-
 	/*
 	 * increment relation ref count while scanning relation
 	 *
@@ -1700,16 +1703,6 @@ appendonly_beginrangescan_internal(Relation relation,
 	attr->compressLevel = relation->rd_appendonly->compresslevel;
 	attr->checksum = relation->rd_appendonly->checksum;
 	attr->safeFSWriteSize = relation->rd_appendonly->safefswritesize;
-
-	/*
-	 * Adding a NOTOAST table attribute in 3.3.3 would require a catalog
-	 * change, so in the interim we will test this with a GUC.
-	 *
-	 * This GUC must have the same value on write and read.
-	 */
-/* 	scan->aos_notoast = relation->rd_appendonly->notoast; */
-	scan->aos_notoast = Debug_appendonly_use_no_toast;
-
 
 	/* UNDONE: We are calling the static header length routine here. */
 	scan->maxDataLen =
@@ -1768,8 +1761,8 @@ appendonly_beginrangescan(Relation relation,
 
 	for (i = 0; i < segfile_count; i++)
 	{
-		seginfo[i] = GetFileSegInfo(relation, appendOnlyMetaDataSnapshot,
-									segfile_no_arr[i]);
+		seginfo[	i] = GetFileSegInfo(relation, appendOnlyMetaDataSnapshot,
+										segfile_no_arr[i]);
 	}
 	return appendonly_beginrangescan_internal(relation,
 											  snapshot,
@@ -1980,7 +1973,7 @@ static bool
 fetchNextBlock(AppendOnlyFetchDesc aoFetchDesc)
 {
 	AppendOnlyExecutorReadBlock *executorReadBlock =
-		&aoFetchDesc->executorReadBlock;
+	&aoFetchDesc->executorReadBlock;
 
 	/*
 	 * Try to read next block.
@@ -2178,8 +2171,7 @@ appendonly_fetch_init(Relation relation,
 
 	AppendOnlyStorageAttributes *attr;
 
-	ValidateAppendOnlyMetaDataSnapshot(&appendOnlyMetaDataSnapshot);
-	PGFunction *fns = NULL;
+	PGFunction *fns;
 
 	StringInfoData titleBuf;
 

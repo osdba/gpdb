@@ -336,9 +336,9 @@ testdb=#</codeblock>
         </plentry>
         <plentry>
           <pt>\copy {<varname>table</varname> [(<varname>column_list</varname>)] |
-              (<varname>query</varname>)} {from | to} {<varname>filename</varname> | stdin | stdout
-            | pstdin | pstdout} [with] [binary] [oids] [delimiter [as]
-            '<varname>character</varname>'] [null [as] '<varname>string</varname>'] [csv [header]
+              (<varname>query</varname>)} {from | to} {'<varname>filename</varname>' | stdin |
+            stdout | pstdin | pstdout} [with] [binary] [oids] [delimiter [as]
+              '<varname>character</varname>'] [null [as] '<varname>string</varname>'] [csv [header]
             [quote [as] 'character'] [escape [as] '<varname>character</varname>'] [force quote
             column_list] [force not null column_list]]</pt>
           <pd>Performs a frontend (client) copy. This is an operation that runs an SQL
@@ -430,6 +430,10 @@ testdb=#</codeblock>
             shown.</pd>
         </plentry>
         <plentry>
+          <pt>\dE [<varname>relation_pattern</varname>]</pt>
+          <pd>Lists all external tables, or only those that match the pattern.</pd>
+        </plentry>
+        <plentry>
           <pt>\df [<varname>function_pattern</varname>] | \df+ [<varname>function_pattern
             </varname>]</pt>
           <pd>Lists available functions, together with their argument and return types. If pattern
@@ -493,8 +497,10 @@ testdb=#</codeblock>
           <pd>Lists all database roles, or only those that match pattern.</pd>
         </plentry>
         <plentry>
-          <pt>\dx [<varname>extension_pattern</varname>]</pt>
-          <pd>Lists all installed extensions, or only those that match the pattern.</pd>
+          <pt>\dx [<varname>extension_pattern</varname>] | \dx+
+              [<varname>extension_pattern</varname>]</pt>
+          <pd>Lists all installed extensions, or only those that match the pattern.
+              <codeph>\dx</codeph> and <codeph>\dx+</codeph> are functionally equivalent.</pd>
         </plentry>
         <plentry>
           <pt>\e | \edit [<varname>filename</varname>]</pt>

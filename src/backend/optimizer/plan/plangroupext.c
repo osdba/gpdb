@@ -3,10 +3,13 @@
  * plangroupext.c
  *    Planning routines for grouping extensions.
  *
- * Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
  *
  * IDENTIFICATION
  *    src/backend/optimizer/plan/plangroupext.c
+ *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -207,6 +210,46 @@ static TargetEntry *tlist_member_by_ressortgroupref(List *targetList, int ressor
 		}
 	}
 	return NULL;
+}
+
+
+/*
+ * Reorder a path key, using given column mappings.
+ */
+static List *
+reorder_pathkeys(PlannerInfo *root,
+				 List *pathkeys,
+				 AttrNumber *orig_grpColIdx,
+				 AttrNumber *new_grpColIdx)
+{
+	List	   *result = NIL;
+	int			grpno;
+	int			numgrpkeys = list_length(pathkeys);
+
+	for (grpno = 0; grpno < numgrpkeys; grpno++)
+	{
+		PathKey	   *pk;
+		int			pos;
+
+		/*
+		 * Find the index position in orig_grpColIdx, in which the element is
+		 * equal to new_grpColIdx[grpno]. This index position points to the
+		 * place that the corresponding PathKey in pathkeys.
+		 */
+		for (pos = 0; pos < numgrpkeys; pos++)
+		{
+			if (orig_grpColIdx[pos] == new_grpColIdx[grpno])
+				break;
+		}
+
+		Assert(pos < numgrpkeys);
+
+		pk = (PathKey *) list_nth(pathkeys, pos);
+
+		result = lappend(result, pk);
+	}
+
+	return result;
 }
 
 /**
@@ -505,6 +548,7 @@ make_list_aggs_for_rollup(PlannerInfo *root,
 	/* The query has a non-empty set group clause */
 	bool has_groups = (root->parse->groupClause != NIL);
 	bool need_repeat_node = false;
+	List	   *group_pathkeys;
 
 	TargetEntry *tle;
 	uint64    input_grouping = 0;
@@ -623,19 +667,16 @@ make_list_aggs_for_rollup(PlannerInfo *root,
 			/* Add sort node if needed, and set AggStrategy */
 			if (root->parse->groupClause)
 			{
-				if (!pathkeys_contained_in(root->group_pathkeys,
+				group_pathkeys = reorder_pathkeys(root, root->group_pathkeys,
+												  orig_grpColIdx,
+												  groupColIdx);
+				if (!pathkeys_contained_in(group_pathkeys,
 										   context->current_pathkeys))
 				{
 					current_lefttree = (Plan *)
-						make_sort_from_reordered_groupcols(root,
-														   root->parse->groupClause,
-														   orig_grpColIdx,
-														   groupColIdx,
-														   NULL,
-														   NULL,
-														   context->current_rollup->numcols - group_no,
-														   current_lefttree);
-					context->current_pathkeys = root->group_pathkeys;
+						make_sort_from_pathkeys(root, current_lefttree, group_pathkeys,
+												-1, false);
+					context->current_pathkeys = group_pathkeys;
 					mark_sort_locus(current_lefttree);
 
 					if (!context->is_agg)
@@ -849,38 +890,23 @@ make_list_aggs_for_rollup(PlannerInfo *root,
 		/* Add a sort node */
 		if (context->aggstrategy == AGG_SORTED)
 		{
-			AttrNumber *orig_prelimGroupColIdx =
-				(AttrNumber *)palloc0(context->numGroupCols * sizeof(AttrNumber));
-			int attno;
-			TargetEntry *grouping_entry;
-			TargetEntry *groupid_entry;
+			Oid		   *cmpOperators = palloc(context->numGroupCols * sizeof(Oid));
+			bool	   *nullsFirst = palloc(context->numGroupCols * sizeof(bool));
+			int			i;
 
-			/* Create a group column index array that maps columns in
-			 * prelimGroupColIdx to the position in the original GROUP
-			 * BY clause.
-			 */
-			for (attno=0; attno<context->numGroupCols -1; attno++)
-				orig_prelimGroupColIdx[attno] = attno+1;
+			for (i = 0; i < context->numGroupCols; i++)
+			{
+				cmpOperators[i] = get_ordering_op_for_equality_op(prelimGroupOperators[i], false);
+				nullsFirst[i] = false;
+			}
 
-			grouping_entry =
-				get_tle_by_resno(agg_node->targetlist,
-								 prelimGroupColIdx[context->numGroupCols - 2]);
-			groupid_entry =
-				get_tle_by_resno(agg_node->targetlist,
-								 prelimGroupColIdx[context->numGroupCols - 1]);
-			agg_node = (Plan *)
-				make_sort_from_reordered_groupcols(root,
-												   root->parse->groupClause,
-												   orig_prelimGroupColIdx,
-												   prelimGroupColIdx,
-												   grouping_entry,
-												   groupid_entry,
-												   context->numGroupCols - 2,
-												   agg_node);
-			pfree(orig_prelimGroupColIdx);
+			agg_node = (Plan *) make_sort(root, agg_node, context->numGroupCols,
+										  prelimGroupColIdx,
+										  cmpOperators,
+										  nullsFirst, -1.0);
 			mark_sort_locus(agg_node);
 		}
-		
+
 		/* Convert # groups to long int --- but 'ware overflow! */
 		lNumGroups = (long) Min(*context->p_dNumGroups, (double) LONG_MAX);
 
@@ -930,8 +956,7 @@ make_list_aggs_for_rollup(PlannerInfo *root,
  * added and the first subplan is returned.
  */
 static Plan *
-add_append_node(List *subplans,
-				GroupExtContext *context)
+add_append_node(PlannerInfo *root, List *subplans, GroupExtContext *context)
 {
 	Plan *result_plan;
 	GpSetOpType optype = PSETOP_NONE;
@@ -942,7 +967,7 @@ add_append_node(List *subplans,
 		if (Gp_role == GP_ROLE_DISPATCH)
 		{
 			optype = choose_setop_type(subplans);
-			adjust_setop_arguments(subplans, optype);
+			adjust_setop_arguments(root, subplans, optype);
 		}
 		
 		/* Append all agg_plans together */
@@ -1190,7 +1215,7 @@ generate_dqa_plan(PlannerInfo *root,
 		root->parse = orig_query;
 		root->parse->groupClause = new_groupClause;
 		root->parse->havingQual = (Node *)new_qual;
-		
+
 		/* Add an explicit sort if we couldn't make the path
 		 * come out the way the Agg/Group node needs it.
 		 */
@@ -1198,11 +1223,8 @@ generate_dqa_plan(PlannerInfo *root,
 								   pathkeys_copy))
 		{
 			subplan = (Plan *)
-				make_sort_from_groupcols(root,
-										 root->parse->groupClause,
-										 context->grpColIdx,
-										 false,
-										 subplan);
+				make_sort_from_pathkeys(root, subplan, root->group_pathkeys,
+										-1, false);
 			pathkeys_copy = root->group_pathkeys;
 			mark_sort_locus(subplan);
 			
@@ -1335,30 +1357,30 @@ plan_append_aggs_with_gather(PlannerInfo *root,
 	AttrNumber *orig_grpColIdx;
 	Oid		   *orig_grpOperators;
 	double      motion_cost_per_row;
+	List	   *group_pathkeys;
 
 	orig_grpColIdx = context->grpColIdx;
 	orig_grpOperators = context->grpOperators;
 	context->grpColIdx = context->current_rollup->colIdx;
 	context->grpOperators = context->current_rollup->operators;
-	
+
+	group_pathkeys = reorder_pathkeys(root,
+									  root->group_pathkeys,
+									  orig_grpColIdx,
+									  context->grpColIdx);
+
 	/* Add an explicit sort if we couldn't make the path
 	 * come out the way the Agg/Group node needs it.
 	 */
-	if (!pathkeys_contained_in(root->group_pathkeys,
+	if (!pathkeys_contained_in(group_pathkeys,
 							   context->current_pathkeys))
 	{
 		lefttree = (Plan *)
-			make_sort_from_reordered_groupcols(root,
-											   root->parse->groupClause,
-											   orig_grpColIdx,
-											   context->grpColIdx,
-											   NULL,
-											   NULL,
-											   context->numGroupCols,
-											   lefttree);
-		context->current_pathkeys = root->group_pathkeys;
+			make_sort_from_pathkeys(root, lefttree, group_pathkeys,
+									-1, false);
+		context->current_pathkeys = group_pathkeys;
 		mark_sort_locus(lefttree);
-		
+
 		/* If this is a Group node, pass DISTINCT to sort */
 		if (!context->is_agg &&
 			IsA(lefttree, Sort) &&
@@ -1388,7 +1410,7 @@ plan_append_aggs_with_gather(PlannerInfo *root,
 	if (lefttree->flow->flotype != FLOW_SINGLETON)
 	{
 		gather_subplan =
-			(Plan *)make_motion_gather_to_QE(lefttree, (context->current_pathkeys != NIL));
+			(Plan *)make_motion_gather_to_QE(root, lefttree, context->current_pathkeys);
 		gather_subplan->total_cost +=
 			motion_cost_per_row * gather_subplan->plan_rows;
 	}
@@ -1434,15 +1456,12 @@ plan_append_aggs_with_gather(PlannerInfo *root,
 			/* Add an explicit sort if we couldn't make the path
 			 * come out the way the Agg/Group node needs it.
 			 */
-			if (!pathkeys_contained_in(root->group_pathkeys,
+			if (!pathkeys_contained_in(group_pathkeys,
 									   pathkeys))
 			{
 				subplan = (Plan *)
-					make_sort_from_groupcols(root,
-											 root->parse->groupClause,
-											 context->grpColIdx,
-											 false,
-											 subplan);
+					make_sort_from_pathkeys(root, subplan, group_pathkeys,
+											-1, false);
 				mark_sort_locus(subplan);
 
 				/* If this is a Group node, pass DISTINCT to sort */
@@ -1489,7 +1508,7 @@ plan_append_aggs_with_gather(PlannerInfo *root,
 		}
 	}
 
-	result_plan = add_append_node(agg_plans, context);
+	result_plan = add_append_node(root, agg_plans, context);
 
 	return result_plan;
 }
@@ -1655,7 +1674,7 @@ plan_append_aggs_with_rewrite(PlannerInfo *root,
 	root->simple_rel_array_size = orig_rel_array_size;
 	memcpy(root->parse, final_query, sizeof(Query));
 
-	result_plan = add_append_node(agg_plans, context);
+	result_plan = add_append_node(root, agg_plans, context);
 	
 	return result_plan;
 }
@@ -1729,9 +1748,7 @@ add_first_agg(PlannerInfo *root,
 			current_lefttree);
 
 	/* Pull up the Flow from the subplan */
-	agg_node->flow =
-		pull_up_Flow(agg_node, agg_node->lefttree,
-					 context->aggstrategy == AGG_SORTED);
+	agg_node->flow = pull_up_Flow(agg_node, agg_node->lefttree);
 
 	/* Simply pulling up the Flow from the subplan is not enough.
 	 * We set hash->hashExpr to NULL since we can not be sure that
@@ -2131,7 +2148,7 @@ plan_list_rollup_plans(PlannerInfo *root,
 		{
 			Plan *plan = (Plan *) make_result(root, lefttree->targetlist, NULL, lefttree);
 			if (lefttree->flow)
-				plan->flow = pull_up_Flow(plan, lefttree, true);
+				plan->flow = pull_up_Flow(plan, lefttree);
 			lefttree = plan;
 		}
 	
@@ -2286,7 +2303,7 @@ plan_list_rollup_plans(PlannerInfo *root,
 		if ( Gp_role == GP_ROLE_DISPATCH )
 		{
 			optype = choose_setop_type(rollup_plans);
-			adjust_setop_arguments(rollup_plans, optype);
+			adjust_setop_arguments(root, rollup_plans, optype);
 		}
 
 		/* Append all rollup_plans together */

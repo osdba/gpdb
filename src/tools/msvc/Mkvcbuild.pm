@@ -3,7 +3,7 @@ package Mkvcbuild;
 #
 # Package that generates build files for msvc build
 #
-# src/tools/msvc/Mkvcbuild.pm
+# $PostgreSQL: pgsql/src/tools/msvc/Mkvcbuild.pm,v 1.26 2008/02/28 12:17:59 mha Exp $
 #
 use Carp;
 use Win32;
@@ -60,7 +60,7 @@ sub mkvcbuild
 
     $postgres = $solution->AddProject('postgres','exe','','src\backend');
     $postgres->AddIncludeDir('src\backend');
-    $postgres->AddIncludeDir('src\backend\gp_libpq_fe');
+    $postgres->AddIncludeDir('src\interface\libpq');
     $postgres->AddIncludeDir('src\port');
     $postgres->AddDir('src\backend\port\win32');
     $postgres->AddFile('src\backend\utils\fmgrtab.c');

@@ -3,10 +3,39 @@
 We've confirmed that these steps work on a brand new installation of macOS Sierra or a 
 brand new installation of macOS Sierra with [Pivotal's workstation-setup](https://github.com/pivotal/workstation-setup)
 
+## Step: Disable System Integrity Protection
+
+Note that you may need to disable System Integrity Protection in order to bring
+up the gpdemo cluster. Without doing this, psql commands run in child processes
+spawned by gpinitsystem may have the DYLD_* environment variables removed from
+their environments.
+
 ## Step: install needed dependencies. This will install homebrew if missing
 ```
 ./README.macOS.bash
+source ~/.bash_profile
 ```
+
+## Step: Workaround for libreadline / libxml2 on OSX 10.11 (El Capitan)
+
+Symptoms:
+* Running `./configure`,
+* You see output
+  `configure: error: readline library not found`, and
+* in `config.log` you see
+  `ld: file not found: /usr/lib/system/libsystem_symptoms.dylib for architecture x86_64`
+
+There is an issue with Xcode 8.1 on El Capitan. Here's a workaround:
+
+```
+brew install libxml2
+brew link libxml2 --force
+```
+
+Other workarounds may include downgrading to Xcode 7.3, or installing the CLT
+package from Xcode 7.3.
+
+For more info, [this seems to be the best thread](https://github.com/Homebrew/brew/issues/972)
 
 ## Step: verify that you can ssh to your machine name without a password
 ```

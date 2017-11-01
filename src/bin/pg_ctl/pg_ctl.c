@@ -4,7 +4,7 @@
  *
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  *
- * $PostgreSQL: pgsql/src/bin/pg_ctl/pg_ctl.c,v 1.92.2.8 2009/11/14 15:39:41 mha Exp $
+ * $PostgreSQL: pgsql/src/bin/pg_ctl/pg_ctl.c,v 1.96 2008/02/29 23:31:20 adunstan Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -26,6 +26,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -34,7 +35,6 @@
 #include "libpq/pqsignal.h"
 #include "getopt_long.h"
 #include "miscadmin.h"
-#include "lib/stringinfo.h"
 
 #if defined(__CYGWIN__)
 #include <sys/cygwin.h>
@@ -144,7 +144,7 @@ static pid_t postmasterPID = -1;
 static pgpid_t get_pgpid(void);
 static char **readfile(const char *path);
 static void free_readfile(char **optlines);
-static int start_postmaster(void);
+static int	start_postmaster(void);
 static void read_post_opts(void);
 
 static PGPing test_postmaster_connection(bool);
@@ -421,71 +421,66 @@ free_readfile(char **optlines)
 static int
 start_postmaster(void)
 {
+	char		cmd[MAXPGPATH];
 
 #ifndef WIN32
+	char		formatstr[MAXPGPATH];
+
+	cmd[0] = '\0';
+	formatstr[0] = '\0';
+
+	if (wrapper != NULL)
 	{
-		char cmd[MAXPGPATH];
-		char formatstr[MAXPGPATH];
-
-		cmd[0] = '\0';
-		formatstr[0] = '\0';
-
-		if (wrapper != NULL)
-		{
-			snprintf(formatstr, MAXPGPATH, "%s ", wrapper);
-			strncat(cmd, formatstr, MAXPGPATH - strlen(cmd) - 1);
-
-			if (wrapper_args != NULL)
-			{
-				snprintf(formatstr, MAXPGPATH, "%s ", wrapper_args);
-				strncat(cmd, formatstr, MAXPGPATH - strlen(cmd) - 1);
-			}
-		}
-
-		/*
-		 * Since there might be quotes to handle here, it is easier simply to pass
-		 * everything to a shell to process them.
-		 */
-		if (log_file != NULL)
-		{
-			snprintf(formatstr, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1 &" SYSTEMQUOTE,
-					postgres_path, pgdata_opt, post_opts,
-					DEVNULL, log_file);
-		}
-		else
-		{
-			snprintf(formatstr, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s < \"%s\" 2>&1 &" SYSTEMQUOTE,
-					postgres_path, pgdata_opt, post_opts, DEVNULL);
-		}
-
+		snprintf(formatstr, MAXPGPATH, "%s ", wrapper);
 		strncat(cmd, formatstr, MAXPGPATH - strlen(cmd) - 1);
 
-		return system(cmd);
+		if (wrapper_args != NULL)
+		{
+			snprintf(formatstr, MAXPGPATH, "%s ", wrapper_args);
+			strncat(cmd, formatstr, MAXPGPATH - strlen(cmd) - 1);
+		}
 	}
+
+	/*
+	 * Since there might be quotes to handle here, it is easier simply to pass
+	 * everything to a shell to process them.
+	 */
+	if (log_file != NULL)
+	{
+		snprintf(formatstr, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1 &" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts,
+				 DEVNULL, log_file);
+	}
+	else
+	{
+		snprintf(formatstr, MAXPGPATH, SYSTEMQUOTE "\"%s\" %s%s < \"%s\" 2>&1 &" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts, DEVNULL);
+	}
+
+	strncat(cmd, formatstr, MAXPGPATH - strlen(cmd) - 1);
+
+	return system(cmd);
 #else							/* WIN32 */
 
-	{
-		char cmd[MAXPGPATH];
-		/*
-		 * On win32 we don't use system(). So we don't need to use & (which would
-		 * be START /B on win32). However, we still call the shell (CMD.EXE) with
-		 * it to handle redirection etc.
-		 */
-		PROCESS_INFORMATION pi;
+	/*
+	 * On win32 we don't use system(). So we don't need to use & (which would
+	 * be START /B on win32). However, we still call the shell (CMD.EXE) with
+	 * it to handle redirection etc.
+	 */
+	PROCESS_INFORMATION pi;
 
-		if (log_file != NULL)
-			snprintf(cmd, MAXPGPATH, "CMD /C " SYSTEMQUOTE "\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1" SYSTEMQUOTE,
-					postgres_path, pgdata_opt, post_opts, DEVNULL, log_file);
-		else
-			snprintf(cmd, MAXPGPATH, "CMD /C " SYSTEMQUOTE "\"%s\" %s%s < \"%s\" 2>&1" SYSTEMQUOTE,
-					postgres_path, pgdata_opt, post_opts, DEVNULL);
+	if (log_file != NULL)
+		snprintf(cmd, MAXPGPATH, "CMD /C " SYSTEMQUOTE "\"%s\" %s%s < \"%s\" >> \"%s\" 2>&1" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts, DEVNULL, log_file);
+	else
+		snprintf(cmd, MAXPGPATH, "CMD /C " SYSTEMQUOTE "\"%s\" %s%s < \"%s\" 2>&1" SYSTEMQUOTE,
+				 postgres_path, pgdata_opt, post_opts, DEVNULL);
 
-		if (!CreateRestrictedProcess(cmd, &pi, false))
-			return GetLastError();
-		CloseHandle(pi.hProcess);
-		CloseHandle(pi.hThread);
-		return 0;
-	}
+	if (!CreateRestrictedProcess(cmd, &pi, false))
+		return GetLastError();
+	CloseHandle(pi.hProcess);
+	CloseHandle(pi.hThread);
+	return 0;
 #endif   /* WIN32 */
 }
 
@@ -512,10 +507,10 @@ test_postmaster_connection(bool do_checkpoint __attribute__((unused)))
 	/*
 	 * Look in post_opts for a -p switch.
 	 *
-	 * This parsing code is not amazingly bright; it could for instance get
-	 * fooled if ' -p' occurs within a quoted argument value.  Given that few
-	 * people pass complicated settings in post_opts, it's probably good
-	 * enough.
+	 * This parsing code is not amazingly bright; it could for instance
+	 * get fooled if ' -p' occurs within a quoted argument value.  Given
+	 * that few people pass complicated settings in post_opts, it's
+	 * probably good enough.
 	 */
 	for (p = post_opts; *p;)
 	{
@@ -547,8 +542,8 @@ test_postmaster_connection(bool do_checkpoint __attribute__((unused)))
 	/*
 	 * Search config file for a 'port' option.
 	 *
-	 * This parsing code isn't amazingly bright either, but it should be okay
-	 * for valid port settings.
+	 * This parsing code isn't amazingly bright either, but it should be
+	 * okay for valid port settings.
 	 */
 	if (!*portstr)
 	{
@@ -755,7 +750,7 @@ do_start(void)
 
 		postmaster_path = pg_malloc(MAXPGPATH);
 
-		if ((ret = find_other_exec(argv0, "postgres", PM_VERSIONSTR,
+		if ((ret = find_other_exec(argv0, "postgres", PG_BACKEND_VERSIONSTR,
 								   postmaster_path)) < 0)
 		{
 			char		full_path[MAXPGPATH];
@@ -1204,7 +1199,8 @@ pgwin32_CommandLine(bool registration)
 	}
 	else
 	{
-		ret = find_other_exec(argv0, "postgres", PM_VERSIONSTR, cmdLine);
+		ret = find_other_exec(argv0, "postgres", PG_BACKEND_VERSIONSTR,
+							  cmdLine);
 		if (ret != 0)
 		{
 			write_stderr(_("%s: could not find postgres program executable\n"), progname);
@@ -1678,9 +1674,9 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION * processInfo, bool as_se
 	}
 
 #ifndef __CYGWIN__
-    AddUserToDacl(processInfo->hProcess);
+    AddUserToTokenDacl(processInfo->hProcess);
 #endif
-    
+
 	CloseHandle(restrictedToken);
 
 	ResumeThread(processInfo->hThread);

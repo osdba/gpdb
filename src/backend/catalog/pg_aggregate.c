@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/catalog/pg_aggregate.c,v 1.90 2008/01/11 18:39:40 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/catalog/pg_aggregate.c,v 1.92 2008/03/27 03:57:33 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -21,6 +21,7 @@
 #include "catalog/pg_language.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_proc_fn.h"
 #include "catalog/pg_type.h"
 #include "cdb/cdbvars.h"
 #include "miscadmin.h"
@@ -84,7 +85,7 @@ AggregateCreate(const char *aggName,
 	if (!aggtransfnName)
 		elog(ERROR, "aggregate must have a transition function");
 
-	/* check for polymorphic arguments and INTERNAL arguments */
+	/* check for polymorphic and INTERNAL arguments */
 	hasPolyArg = false;
 	hasInternalArg = false;
 	for (i = 0; i < numArgs; i++)
@@ -278,7 +279,8 @@ AggregateCreate(const char *aggName,
 							  PointerGetDatum(NULL),	/* proconfig */
 							  1,				/* procost */
 							  0,				/* prorows */
-							  PRODATAACCESS_NONE);		/* prodataaccess */
+							  PRODATAACCESS_NONE,		/* prodataaccess */
+							  PROEXECLOCATION_ANY);		/* proexeclocation */
 
 	/*
 	 * Okay to create the pg_aggregate entry.
@@ -386,8 +388,6 @@ lookup_agg_function(List *fnName,
 {
 	Oid			fnOid;
 	bool		retset;
-	bool        retstrict;
-	bool        retordered;
 	int			nvargs;
 	Oid		   *true_oid_array;
 	FuncDetailCode fdresult;
@@ -402,8 +402,8 @@ lookup_agg_function(List *fnName,
 	 * the function.
 	 */
 	fdresult = func_get_detail(fnName, NIL, nargs, input_types, false, false,
-							   &fnOid, rettype, &retset, &retstrict,
-							   &retordered, &nvargs, &true_oid_array, NULL);
+							   &fnOid, rettype, &retset,
+							   &nvargs, &true_oid_array, NULL);
 
 	/* only valid case is a normal function not returning a set */
 	if (fdresult != FUNCDETAIL_NORMAL || !OidIsValid(fnOid))

@@ -7,7 +7,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/optimizer/clauses.h,v 1.88.2.1 2008/04/01 00:48:44 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/optimizer/clauses.h,v 1.94 2008/08/25 22:42:34 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -17,9 +17,9 @@
 #include "nodes/relation.h"
 #include "optimizer/walkers.h"
 
+
 #define is_opclause(clause)		((clause) != NULL && IsA(clause, OpExpr))
 #define is_funcclause(clause)	((clause) != NULL && IsA(clause, FuncExpr))
-#define is_subplan(clause)		((clause) != NULL && IsA(clause, SubPlan))
 
 // max size of a folded constant when optimizing queries in Orca
 // Note: this is to prevent OOM issues when trying to serialize very large constants
@@ -71,16 +71,21 @@ extern List *make_ands_implicit(Expr *clause);
 extern bool contain_agg_clause(Node *clause);
 extern void count_agg_clauses(Node *clause, AggClauseCounts *counts);
 
-extern bool expression_returns_set(Node *clause);
+extern bool contain_window_function(Node *clause);
+
 extern double expression_returns_set_rows(Node *clause);
 
 extern bool contain_subplans(Node *clause);
 
 extern bool contain_mutable_functions(Node *clause);
 extern bool contain_volatile_functions(Node *clause);
-extern bool contain_window_functions(Node *clause);
 extern bool contain_nonstrict_functions(Node *clause);
 extern Relids find_nonnullable_rels(Node *clause);
+extern List *find_nonnullable_vars(Node *clause);
+extern List *find_forced_null_vars(Node *clause);
+extern Var *find_forced_null_var(Node *clause);
+
+extern char check_execute_on_functions(Node *clause);
 
 extern bool is_pseudo_constant_clause(Node *clause);
 extern bool is_pseudo_constant_clause_relids(Node *clause, Relids relids);
@@ -105,19 +110,10 @@ extern Expr *transform_array_Const_to_ArrayExpr(Const *c);
 
 extern Node *estimate_expression_value(PlannerInfo *root, Node *node);
 
+extern Query *inline_set_returning_function(PlannerInfo *root, Node *node);
+
 extern Expr *evaluate_expr(Expr *expr, Oid result_type, int32 result_typmod);
 
-extern Node *expression_tree_mutator(Node *node, Node *(*mutator) (),
-												 void *context);
-
-extern Query *query_tree_mutator(Query *query, Node *(*mutator) (),
-											 void *context, int flags);
-
-extern List *range_table_mutator(List *rtable, Node *(*mutator) (),
-											 void *context, int flags);
-
-extern Node *query_or_expression_tree_mutator(Node *node, Node *(*mutator) (),
-												   void *context, int flags);
 extern bool is_grouping_extension(CanonicalGroupingSets *grpsets);
 extern bool contain_extended_grouping(List *grp);
 

@@ -19,11 +19,12 @@
  *
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/nodes/equalfuncs.c,v 1.332 2008/10/04 21:56:53 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/nodes/equalfuncs.c,v 1.352 2009/04/05 19:59:40 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -130,8 +131,8 @@ _equalRangeVar(RangeVar *a, RangeVar *b)
 	return true;
 }
 
-/* 
- * Records information about the target of a CTAS (SELECT ... INTO). 
+/*
+ * Records information about the target of a CTAS (SELECT ... INTO).
  */
 static bool
 _equalIntoClause(IntoClause *a, IntoClause *b)
@@ -202,11 +203,13 @@ _equalAggref(Aggref *a, Aggref *b)
 	COMPARE_SCALAR_FIELD(aggfnoid);
 	COMPARE_SCALAR_FIELD(aggtype);
 	COMPARE_NODE_FIELD(args);
-	COMPARE_SCALAR_FIELD(agglevelsup);
-	COMPARE_SCALAR_FIELD(aggstar);
+	COMPARE_NODE_FIELD(aggorder);
 	COMPARE_SCALAR_FIELD(aggdistinct);
+	COMPARE_NODE_FIELD(aggfilter);
+	COMPARE_SCALAR_FIELD(aggstar);
 	COMPARE_SCALAR_FIELD(aggstage);
-    COMPARE_NODE_FIELD(aggorder);
+	COMPARE_SCALAR_FIELD(agglevelsup);
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -222,17 +225,19 @@ _equalAggOrder(AggOrder *a, AggOrder *b)
 }
 
 static bool
-_equalWindowRef(WindowRef *a, WindowRef *b)
+_equalWindowFunc(WindowFunc *a, WindowFunc *b)
 {
 	COMPARE_SCALAR_FIELD(winfnoid);
-	COMPARE_SCALAR_FIELD(restype);
+	COMPARE_SCALAR_FIELD(wintype);
 	COMPARE_NODE_FIELD(args);
-	COMPARE_SCALAR_FIELD(winlevelsup);
+	COMPARE_NODE_FIELD(aggfilter);
+	COMPARE_SCALAR_FIELD(winref);
+	COMPARE_SCALAR_FIELD(winstar);
+	COMPARE_SCALAR_FIELD(winagg);
 	COMPARE_SCALAR_FIELD(windistinct);
-	COMPARE_SCALAR_FIELD(winspec);
 	COMPARE_SCALAR_FIELD(winindex);
 	COMPARE_SCALAR_FIELD(winstage);
-	COMPARE_SCALAR_FIELD(winlevel);
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -369,6 +374,7 @@ _equalSubPlan(SubPlan *a, SubPlan *b)
 	COMPARE_NODE_FIELD(testexpr);
 	COMPARE_NODE_FIELD(paramIds);
 	COMPARE_SCALAR_FIELD(plan_id);
+	COMPARE_STRING_FIELD(plan_name);
 	COMPARE_SCALAR_FIELD(firstColType);
 	COMPARE_SCALAR_FIELD(firstColTypmod);
 	COMPARE_SCALAR_FIELD(useHashTable);
@@ -379,6 +385,16 @@ _equalSubPlan(SubPlan *a, SubPlan *b)
 	COMPARE_NODE_FIELD(parParam);
 	COMPARE_NODE_FIELD(args);
 	COMPARE_NODE_FIELD(extParam);
+	COMPARE_SCALAR_FIELD(startup_cost);
+	COMPARE_SCALAR_FIELD(per_call_cost);
+
+	return true;
+}
+
+static bool
+_equalAlternativeSubPlan(AlternativeSubPlan *a, AlternativeSubPlan *b)
+{
+	COMPARE_NODE_FIELD(subplans);
 
 	return true;
 }
@@ -517,7 +533,7 @@ _equalArrayExpr(ArrayExpr *a, ArrayExpr *b)
 	COMPARE_SCALAR_FIELD(element_typeid);
 	COMPARE_NODE_FIELD(elements);
 	COMPARE_SCALAR_FIELD(multidims);
-	/* COMPARE_LOCATION_FIELD(location); */
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -668,9 +684,9 @@ _equalSetToDefault(SetToDefault *a, SetToDefault *b)
 static bool
 _equalCurrentOfExpr(CurrentOfExpr *a, CurrentOfExpr *b)
 {
+	COMPARE_SCALAR_FIELD(cvarno);
 	COMPARE_STRING_FIELD(cursor_name);
 	COMPARE_SCALAR_FIELD(cursor_param);
-	COMPARE_SCALAR_FIELD(cvarno);
 	COMPARE_SCALAR_FIELD(target_relid);
 
 	/* some attributes omitted as they're bound only just before executor dispatch */
@@ -731,9 +747,6 @@ _equalFlow(Flow *a, Flow *b)
 	COMPARE_SCALAR_FIELD(req_move);
 	COMPARE_SCALAR_FIELD(locustype);
 	COMPARE_SCALAR_FIELD(segindex);
-	COMPARE_SCALAR_FIELD(numSortCols);
-	COMPARE_POINTER_FIELD(sortColIdx, a->numSortCols*sizeof(AttrNumber));
-	COMPARE_POINTER_FIELD(sortOperators, a->numSortCols*sizeof(Oid));
 	COMPARE_NODE_FIELD(hashExpr);
 
 	return true;
@@ -788,25 +801,41 @@ _equalRestrictInfo(RestrictInfo *a, RestrictInfo *b)
 }
 
 static bool
-_equalOuterJoinInfo(OuterJoinInfo *a, OuterJoinInfo *b)
+_equalPlaceHolderVar(PlaceHolderVar *a, PlaceHolderVar *b)
 {
-	COMPARE_BITMAPSET_FIELD(min_lefthand);
-	COMPARE_BITMAPSET_FIELD(min_righthand);
-	COMPARE_BITMAPSET_FIELD(syn_lefthand);
-	COMPARE_BITMAPSET_FIELD(syn_righthand);
-	COMPARE_SCALAR_FIELD(join_type);
-	COMPARE_SCALAR_FIELD(lhs_strict);
-	COMPARE_SCALAR_FIELD(delay_upper_joins);
+	/*
+	 * We intentionally do not compare phexpr.  Two PlaceHolderVars with the
+	 * same ID and levelsup should be considered equal even if the contained
+	 * expressions have managed to mutate to different states.  One way in
+	 * which that can happen is that initplan sublinks would get replaced by
+	 * differently-numbered Params when sublink folding is done.  (The end
+	 * result of such a situation would be some unreferenced initplans, which
+	 * is annoying but not really a problem.)
+	 *
+	 * COMPARE_NODE_FIELD(phexpr);
+	 */
+	COMPARE_BITMAPSET_FIELD(phrels);
+	COMPARE_SCALAR_FIELD(phid);
+	COMPARE_SCALAR_FIELD(phlevelsup);
 
 	return true;
 }
 
 static bool
-_equalInClauseInfo(InClauseInfo *a, InClauseInfo *b)
+_equalSpecialJoinInfo(SpecialJoinInfo *a, SpecialJoinInfo *b)
 {
-	COMPARE_BITMAPSET_FIELD(righthand);
-	COMPARE_NODE_FIELD(sub_targetlist);
-	COMPARE_NODE_FIELD(in_operators);
+	COMPARE_BITMAPSET_FIELD(min_lefthand);
+	COMPARE_BITMAPSET_FIELD(min_righthand);
+	COMPARE_BITMAPSET_FIELD(syn_lefthand);
+	COMPARE_BITMAPSET_FIELD(syn_righthand);
+	COMPARE_SCALAR_FIELD(jointype);
+	COMPARE_SCALAR_FIELD(lhs_strict);
+	COMPARE_SCALAR_FIELD(delay_upper_joins);
+	COMPARE_NODE_FIELD(join_quals);
+	COMPARE_SCALAR_FIELD(try_join_unique);	/* CDB */
+	COMPARE_SCALAR_FIELD(consider_dedup);		/* CDB */
+	COMPARE_NODE_FIELD(semi_operators);
+	COMPARE_NODE_FIELD(semi_rhs_exprs);
 
 	return true;
 }
@@ -821,6 +850,19 @@ _equalAppendRelInfo(AppendRelInfo *a, AppendRelInfo *b)
 	COMPARE_NODE_FIELD(col_mappings);
 	COMPARE_NODE_FIELD(translated_vars);
 	COMPARE_SCALAR_FIELD(parent_reloid);
+
+	return true;
+}
+
+static bool
+_equalPlaceHolderInfo(PlaceHolderInfo *a, PlaceHolderInfo *b)
+{
+	COMPARE_SCALAR_FIELD(phid);
+	COMPARE_NODE_FIELD(ph_var);
+	COMPARE_BITMAPSET_FIELD(ph_eval_at);
+	COMPARE_BITMAPSET_FIELD(ph_needed);
+	COMPARE_BITMAPSET_FIELD(ph_may_need);
+	COMPARE_SCALAR_FIELD(ph_width);
 
 	return true;
 }
@@ -840,9 +882,10 @@ _equalQuery(Query *a, Query *b)
 	COMPARE_SCALAR_FIELD(resultRelation);
 	COMPARE_NODE_FIELD(intoClause);
 	COMPARE_SCALAR_FIELD(hasAggs);
-	COMPARE_SCALAR_FIELD(hasWindFuncs);
+	COMPARE_SCALAR_FIELD(hasWindowFuncs);
 	COMPARE_SCALAR_FIELD(hasSubLinks);
 	COMPARE_SCALAR_FIELD(hasDynamicFunctions);
+	COMPARE_SCALAR_FIELD(hasFuncsWithExecRestrictions);
 	COMPARE_NODE_FIELD(rtable);
 	COMPARE_NODE_FIELD(jointree);
 	COMPARE_NODE_FIELD(targetList);
@@ -853,16 +896,16 @@ _equalQuery(Query *a, Query *b)
 	COMPARE_NODE_FIELD(distinctClause);
 	COMPARE_NODE_FIELD(sortClause);
 	COMPARE_NODE_FIELD(scatterClause);
+	COMPARE_SCALAR_FIELD(isTableValueSelect);
 	COMPARE_NODE_FIELD(cteList);
 	COMPARE_SCALAR_FIELD(hasRecursive);
-	COMPARE_SCALAR_FIELD(hasModifyingCTE);
 	COMPARE_NODE_FIELD(limitOffset);
 	COMPARE_NODE_FIELD(limitCount);
 	COMPARE_NODE_FIELD(rowMarks);
 	COMPARE_NODE_FIELD(setOperations);
-	
+
 	/* Prior to 3.4 this test was
-	 *     COMPARE_SCALAR_FIELD(intoPolicy); 
+	 *     COMPARE_SCALAR_FIELD(intoPolicy);
 	 * Maybe GpPolicy should be a Node?
 	 */
 	if (!GpPolicyEqual(a->intoPolicy, b->intoPolicy))
@@ -951,7 +994,7 @@ _equalAlterTableStmt(AlterTableStmt *a, AlterTableStmt *b)
 	COMPARE_NODE_FIELD(relation);
 	COMPARE_NODE_FIELD(cmds);
 	COMPARE_SCALAR_FIELD(relkind);
-	
+
 	/* No need to compare AT workspace fields.  */
 
 	return true;
@@ -966,7 +1009,7 @@ _equalAlterTableCmd(AlterTableCmd *a, AlterTableCmd *b)
 	COMPARE_NODE_FIELD(transform);
 	COMPARE_SCALAR_FIELD(behavior);
 	COMPARE_SCALAR_FIELD(part_expanded);
-	
+
 	/* No need to compare AT workspace field, partoids.  */
 
 	return true;
@@ -1105,7 +1148,6 @@ _equalDeclareCursorStmt(DeclareCursorStmt *a, DeclareCursorStmt *b)
 	COMPARE_STRING_FIELD(portalname);
 	COMPARE_SCALAR_FIELD(options);
 	COMPARE_NODE_FIELD(query);
-	COMPARE_SCALAR_FIELD(is_simply_updatable);
 
 	return true;
 }
@@ -1144,12 +1186,14 @@ _equalCopyStmt(CopyStmt *a, CopyStmt *b)
 	COMPARE_NODE_FIELD(query);
 	COMPARE_NODE_FIELD(attlist);
 	COMPARE_SCALAR_FIELD(is_from);
+	COMPARE_SCALAR_FIELD(is_program);
 	COMPARE_SCALAR_FIELD(skip_ext_partition);
 	COMPARE_STRING_FIELD(filename);
 	COMPARE_NODE_FIELD(options);
 	COMPARE_NODE_FIELD(sreh);
-
-
+	COMPARE_SCALAR_FIELD(nattrs);
+	COMPARE_SCALAR_FIELD(ptype);
+	COMPARE_POINTER_FIELD(distribution_attrs,a->nattrs * sizeof(AttrNumber));
 	return true;
 }
 
@@ -1787,7 +1831,7 @@ _equalDenyLoginPoint(DenyLoginPoint *a, DenyLoginPoint *b)
 {
 	COMPARE_NODE_FIELD(day);
 	COMPARE_NODE_FIELD(time);
-	
+
 	return true;
 }
 
@@ -2023,7 +2067,7 @@ _equalAExpr(A_Expr *a, A_Expr *b)
 	COMPARE_NODE_FIELD(name);
 	COMPARE_NODE_FIELD(lexpr);
 	COMPARE_NODE_FIELD(rexpr);
-	COMPARE_SCALAR_FIELD(location);
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -2032,7 +2076,7 @@ static bool
 _equalColumnRef(ColumnRef *a, ColumnRef *b)
 {
 	COMPARE_NODE_FIELD(fields);
-	COMPARE_SCALAR_FIELD(location);
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -2062,13 +2106,13 @@ _equalFuncCall(FuncCall *a, FuncCall *b)
 {
 	COMPARE_NODE_FIELD(funcname);
 	COMPARE_NODE_FIELD(args);
-    COMPARE_NODE_FIELD(agg_order);
+	COMPARE_NODE_FIELD(agg_order);
+	COMPARE_NODE_FIELD(agg_filter);
 	COMPARE_SCALAR_FIELD(agg_star);
 	COMPARE_SCALAR_FIELD(agg_distinct);
 	COMPARE_SCALAR_FIELD(func_variadic);
 	COMPARE_NODE_FIELD(over);
-	COMPARE_SCALAR_FIELD(location);
-	COMPARE_NODE_FIELD(agg_filter);
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -2106,7 +2150,7 @@ _equalResTarget(ResTarget *a, ResTarget *b)
 	COMPARE_STRING_FIELD(name);
 	COMPARE_NODE_FIELD(indirection);
 	COMPARE_NODE_FIELD(val);
-	COMPARE_SCALAR_FIELD(location);
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -2116,13 +2160,12 @@ _equalTypeName(TypeName *a, TypeName *b)
 {
 	COMPARE_NODE_FIELD(names);
 	COMPARE_SCALAR_FIELD(typid);
-	COMPARE_SCALAR_FIELD(timezone);
 	COMPARE_SCALAR_FIELD(setof);
 	COMPARE_SCALAR_FIELD(pct_type);
 	COMPARE_NODE_FIELD(typmods);
 	COMPARE_SCALAR_FIELD(typemod);
 	COMPARE_NODE_FIELD(arrayBounds);
-	COMPARE_SCALAR_FIELD(location);
+	COMPARE_LOCATION_FIELD(location);
 
 	return true;
 }
@@ -2143,6 +2186,21 @@ _equalSortBy(SortBy *a, SortBy *b)
 	COMPARE_SCALAR_FIELD(sortby_dir);
 	COMPARE_SCALAR_FIELD(sortby_nulls);
 	COMPARE_NODE_FIELD(useOp);
+	COMPARE_LOCATION_FIELD(location);
+
+	return true;
+}
+
+static bool
+_equalWindowDef(WindowDef *a, WindowDef *b)
+{
+	COMPARE_STRING_FIELD(name);
+	COMPARE_STRING_FIELD(refname);
+	COMPARE_NODE_FIELD(partitionClause);
+	COMPARE_NODE_FIELD(orderClause);
+	COMPARE_SCALAR_FIELD(frameOptions);
+	COMPARE_NODE_FIELD(startOffset);
+	COMPARE_NODE_FIELD(endOffset);
 	COMPARE_LOCATION_FIELD(location);
 
 	return true;
@@ -2298,49 +2356,6 @@ _equalGroupId(GroupId *a __attribute__((unused)), GroupId *b __attribute__((unus
 }
 
 static bool
-_equalWindowSpecParse(WindowSpecParse *a, WindowSpecParse *b)
-{
-	COMPARE_STRING_FIELD(name);
-	COMPARE_NODE_FIELD(elems);
-
-	return true;
-}
-
-static bool
-_equalWindowSpec(WindowSpec *a, WindowSpec *b)
-{
-	COMPARE_STRING_FIELD(name);
-	COMPARE_STRING_FIELD(parent);
-	COMPARE_NODE_FIELD(partition);
-	COMPARE_NODE_FIELD(order);
-	COMPARE_NODE_FIELD(frame);
-	/* do not compare 'location' field */
-
-	return true;
-}
-
-static bool
-_equalWindowFrame(WindowFrame *a, WindowFrame *b)
-{
-	COMPARE_SCALAR_FIELD(is_rows);
-	COMPARE_SCALAR_FIELD(is_between);
-	COMPARE_NODE_FIELD(trail);
-	COMPARE_NODE_FIELD(lead);
-	COMPARE_SCALAR_FIELD(exclude);
-
-	return true;
-}
-
-static bool
-_equalWindowFrameEdge(WindowFrameEdge *a, WindowFrameEdge *b)
-{
-	COMPARE_SCALAR_FIELD(kind);
-	COMPARE_NODE_FIELD(val);
-
-	return true;
-}
-
-static bool
 _equalPercentileExpr(PercentileExpr *a, PercentileExpr *b)
 {
 	COMPARE_SCALAR_FIELD(perctype);
@@ -2351,6 +2366,22 @@ _equalPercentileExpr(PercentileExpr *a, PercentileExpr *b)
 	COMPARE_NODE_FIELD(pcExpr);
 	COMPARE_NODE_FIELD(tcExpr);
 	/* do not compare 'location' field */
+
+	return true;
+}
+
+static bool
+_equalWindowClause(WindowClause *a, WindowClause *b)
+{
+	COMPARE_STRING_FIELD(name);
+	COMPARE_STRING_FIELD(refname);
+	COMPARE_NODE_FIELD(partitionClause);
+	COMPARE_NODE_FIELD(orderClause);
+	COMPARE_SCALAR_FIELD(frameOptions);
+	COMPARE_NODE_FIELD(startOffset);
+	COMPARE_NODE_FIELD(endOffset);
+	COMPARE_SCALAR_FIELD(winref);
+	COMPARE_SCALAR_FIELD(copiedOrder);
 
 	return true;
 }
@@ -2370,8 +2401,8 @@ _equalWithClause(WithClause *a, WithClause *b)
 {
 	COMPARE_NODE_FIELD(ctes);
 	COMPARE_SCALAR_FIELD(recursive);
-	COMPARE_SCALAR_FIELD(location);
-	
+	COMPARE_LOCATION_FIELD(location);
+
 	return true;
 }
 
@@ -2381,7 +2412,7 @@ _equalCommonTableExpr(CommonTableExpr *a, CommonTableExpr *b)
 	COMPARE_STRING_FIELD(ctename);
 	COMPARE_NODE_FIELD(aliascolnames);
 	COMPARE_NODE_FIELD(ctequery);
-	COMPARE_SCALAR_FIELD(location);
+	COMPARE_LOCATION_FIELD(location);
 	COMPARE_SCALAR_FIELD(cterecursive);
 	COMPARE_SCALAR_FIELD(cterefcount);
 	COMPARE_NODE_FIELD(ctecolnames);
@@ -2582,8 +2613,8 @@ equal(void *a, void *b)
 		case T_AggOrder:
 			retval = _equalAggOrder(a, b);
 			break;
-		case T_WindowRef:
-			retval = _equalWindowRef(a, b);
+		case T_WindowFunc:
+			retval = _equalWindowFunc(a, b);
 			break;
 		case T_ArrayRef:
 			retval = _equalArrayRef(a, b);
@@ -2608,6 +2639,9 @@ equal(void *a, void *b)
 			break;
 		case T_SubPlan:
 			retval = _equalSubPlan(a, b);
+			break;
+		case T_AlternativeSubPlan:
+			retval = _equalAlternativeSubPlan(a, b);
 			break;
 		case T_FieldSelect:
 			retval = _equalFieldSelect(a, b);
@@ -2700,15 +2734,19 @@ equal(void *a, void *b)
 		case T_RestrictInfo:
 			retval = _equalRestrictInfo(a, b);
 			break;
-		case T_OuterJoinInfo:
-			retval = _equalOuterJoinInfo(a, b);
+		case T_PlaceHolderVar:
+			retval = _equalPlaceHolderVar(a, b);
 			break;
-		case T_InClauseInfo:
-			retval = _equalInClauseInfo(a, b);
+		case T_SpecialJoinInfo:
+			retval = _equalSpecialJoinInfo(a, b);
 			break;
 		case T_AppendRelInfo:
 			retval = _equalAppendRelInfo(a, b);
 			break;
+		case T_PlaceHolderInfo:
+			retval = _equalPlaceHolderInfo(a, b);
+			break;
+
 		case T_List:
 		case T_IntList:
 		case T_OidList:
@@ -3068,6 +3106,9 @@ equal(void *a, void *b)
 		case T_SortBy:
 			retval = _equalSortBy(a, b);
 			break;
+		case T_WindowDef:
+			retval = _equalWindowDef(a, b);
+			break;
 		case T_RangeSubselect:
 			retval = _equalRangeSubselect(a, b);
 			break;
@@ -3114,20 +3155,11 @@ equal(void *a, void *b)
 		case T_GroupId:
 			retval = _equalGroupId(a, b);
 			break;
-		case T_WindowSpecParse:
-			retval = _equalWindowSpecParse(a, b);
-			break;
-		case T_WindowSpec:
-			retval = _equalWindowSpec(a, b);
-			break;
-		case T_WindowFrame:
-			retval = _equalWindowFrame(a, b);
-			break;
-		case T_WindowFrameEdge:
-			retval = _equalWindowFrameEdge(a, b);
-			break;
 		case T_PercentileExpr:
 			retval = _equalPercentileExpr(a, b);
+			break;
+		case T_WindowClause:
+			retval = _equalWindowClause(a, b);
 			break;
 		case T_RowMarkClause:
 			retval = _equalRowMarkClause(a, b);

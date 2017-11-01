@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/access/heap/heapam.c,v 1.249.2.6 2010/07/29 16:15:05 rhaas Exp $
+ *	  $PostgreSQL: pgsql/src/backend/access/heap/heapam.c,v 1.255 2008/04/03 17:12:27 tgl Exp $
  *
  *
  * INTERFACE ROUTINES
@@ -39,6 +39,7 @@
  */
 #include "postgres.h"
 
+#include "access/bufmask.h"
 #include "access/heapam.h"
 #include "access/hio.h"
 #include "access/multixact.h"
@@ -56,10 +57,13 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 #include "cdb/cdbpersistentstore.h"
 #include "cdb/cdbvars.h"
+#include "utils/visibility_summary.h"
 
 
 /* GUC variable */
@@ -946,11 +950,11 @@ relation_open(Oid relationId, LOCKMODE lockmode)
 				 errmsg("relation not found (OID %u)", relationId),
 				 errdetail("This can be validly caused by a concurrent delete operation on this object.")));
 	}
-#if 0 /* Upstream code not applicable to GPDB */
+
 	/* Make note that we've accessed a temporary relation */
 	if (r->rd_istemp)
 		MyXactAccessedTempRel = true;
-#endif
+
 	pgstat_initstats(r);
 
 	return r;
@@ -1014,11 +1018,11 @@ try_relation_open(Oid relationId, LOCKMODE lockmode, bool noWait)
 				 errmsg("relation not found (OID %u)", relationId),
 				 errdetail("This can be validly caused by a concurrent delete operation on this object.")));
 	}
-#if 0 /* Upstream code not applicable to GPDB */
+
 	/* Make note that we've accessed a temporary relation */
 	if (r->rd_istemp)
 		MyXactAccessedTempRel = true;
-#endif
+
 	pgstat_initstats(r);
 
 	return r;
@@ -1207,11 +1211,11 @@ relation_open_nowait(Oid relationId, LOCKMODE lockmode)
 				 errmsg("relation not found (OID %u)", relationId),
 				 errdetail("This can be validly caused by a concurrent delete operation on this object.")));
 	}
-#if 0 /* Upstream code not applicable to GPDB */
+
 	/* Make note that we've accessed a temporary relation */
 	if (r->rd_istemp)
 		MyXactAccessedTempRel = true;
-#endif
+
 	pgstat_initstats(r);
 
 	return r;
@@ -1779,41 +1783,6 @@ heap_fetch(Relation relation,
 		   bool keep_buf,
 		   Relation stats_relation)
 {
-	MIRROREDLOCK_BUFMGR_VERIFY_NO_LOCK_LEAK_DECLARE;
-
-	bool result;
-
-	MIRROREDLOCK_BUFMGR_VERIFY_NO_LOCK_LEAK_ENTER;
-
-	/* Assume *userbuf is undefined on entry */
-	*userbuf = InvalidBuffer;
-	result = heap_release_fetch(relation, snapshot, tuple,
-							  userbuf, keep_buf, stats_relation);
-
-
-	MIRROREDLOCK_BUFMGR_VERIFY_NO_LOCK_LEAK_EXIT;
-
-	return result;
-}
-
-/*
- *	heap_release_fetch		- retrieve tuple with given tid
- *
- * This has the same API as heap_fetch except that if *userbuf is not
- * InvalidBuffer on entry, that buffer will be released before reading
- * the new page.  This saves a separate ReleaseBuffer step and hence
- * one entry into the bufmgr when looping through multiple fetches.
- * Also, if *userbuf is the same buffer that holds the target tuple,
- * we avoid bufmgr manipulation altogether.
- */
-bool
-heap_release_fetch(Relation relation,
-				   Snapshot snapshot,
-				   HeapTuple tuple,
-				   Buffer *userbuf,
-				   bool keep_buf,
-				   Relation stats_relation)
-{
 	MIRROREDLOCK_BUFMGR_DECLARE;
 
 	ItemPointer tid = &(tuple->t_self);
@@ -1824,15 +1793,13 @@ heap_release_fetch(Relation relation,
 	bool		valid;
 
 	/*
-	 * get the buffer from the relation descriptor. Note that this does a
-	 * buffer pin, and releases the old *userbuf if not InvalidBuffer.
+	 * Fetch and pin the appropriate page of the relation.
 	 */
 	
 	// -------- MirroredLock ----------
 	MIRROREDLOCK_BUFMGR_LOCK;
 	
-	buffer = ReleaseAndReadBuffer(*userbuf, relation,
-								  ItemPointerGetBlockNumber(tid));
+	buffer = ReadBuffer(relation, ItemPointerGetBlockNumber(tid));
 
 	/*
 	 * Need share lock on buffer to examine tuple commit status.
@@ -5024,7 +4991,7 @@ heap_xlog_clean(XLogRecPtr lsn, XLogRecord *record, bool clean_move)
 	int			ndead;
 	int			nunused;
 
-	if (record->xl_info & XLR_BKP_BLOCK_1)
+	if (IsBkpBlockApplied(record, 0))
 		return;
 
 	reln = XLogOpenRelation(xlrec->heapnode.node);
@@ -5096,7 +5063,7 @@ heap_xlog_freeze(XLogRecPtr lsn, XLogRecord *record)
 	Buffer		buffer;
 	Page		page;
 
-	if (record->xl_info & XLR_BKP_BLOCK_1)
+	if (IsBkpBlockApplied(record, 0))
 		return;
 
 	reln = XLogOpenRelation(xlrec->heapnode.node);
@@ -5211,7 +5178,7 @@ heap_xlog_delete(XLogRecPtr lsn, XLogRecord *record)
 	ItemId		lp = NULL;
 	HeapTupleHeader htup;
 
-	if (record->xl_info & XLR_BKP_BLOCK_1)
+	if (IsBkpBlockApplied(record, 0))
 		return;
 
 	reln = XLogOpenRelation(xlrec->target.node);
@@ -5241,11 +5208,6 @@ heap_xlog_delete(XLogRecPtr lsn, XLogRecord *record)
 
 	if (XLByteLE(lsn, PageGetLSN(page)))		/* changes are applied */
 	{
-		UnlockReleaseBuffer(buffer);
-		
-		MIRROREDLOCK_BUFMGR_UNLOCK;
-		// -------- MirroredLock ----------
-		
 		if (Debug_print_qd_mirroring)
 		{
 			elog(LOG, "delete already appplied: lsn (%X,%X), page (%X,%X)",
@@ -5254,6 +5216,12 @@ heap_xlog_delete(XLogRecPtr lsn, XLogRecord *record)
 				 PageGetLSN(page).xlogid,
 				 PageGetLSN(page).xrecoff);
 		}
+
+		UnlockReleaseBuffer(buffer);
+
+		MIRROREDLOCK_BUFMGR_UNLOCK;
+		// -------- MirroredLock ----------
+
 		return;
 	}
 
@@ -5308,7 +5276,7 @@ heap_xlog_insert(XLogRecPtr lsn, XLogRecord *record)
 	xl_heap_header xlhdr;
 	uint32		newlen;
 
-	if (record->xl_info & XLR_BKP_BLOCK_1)
+	if (IsBkpBlockApplied(record, 0))
 		return;
 
 	reln = XLogOpenRelation(xlrec->target.node);
@@ -5426,7 +5394,7 @@ heap_xlog_update(XLogRecPtr lsn, XLogRecord *record, bool move, bool hot_update)
 	int			hsize;
 	uint32		newlen;
 
-	if (record->xl_info & XLR_BKP_BLOCK_1)
+	if (IsBkpBlockApplied(record, 0))
 	{
 		if (samepage)
 			return;				/* backup block covered both changes */
@@ -5519,7 +5487,7 @@ heap_xlog_update(XLogRecPtr lsn, XLogRecord *record, bool move, bool hot_update)
 
 newt:;
 
-	if (record->xl_info & XLR_BKP_BLOCK_2)
+	if (IsBkpBlockApplied(record, 1))
 	{		
 		MIRROREDLOCK_BUFMGR_UNLOCK;
 		// -------- MirroredLock ----------
@@ -5634,7 +5602,7 @@ heap_xlog_lock(XLogRecPtr lsn, XLogRecord *record)
 	ItemId		lp = NULL;
 	HeapTupleHeader htup;
 
-	if (record->xl_info & XLR_BKP_BLOCK_1)
+	if (IsBkpBlockApplied(record, 0))
 		return;
 
 	reln = XLogOpenRelation(xlrec->target.node);
@@ -5716,7 +5684,7 @@ heap_xlog_inplace(XLogRecPtr lsn, XLogRecord *record)
 	uint32		oldlen;
 	uint32		newlen;
 
-	if (record->xl_info & XLR_BKP_BLOCK_1)
+	if (IsBkpBlockApplied(record, 0))
 		return;
 
 	// -------- MirroredLock ----------
@@ -6105,4 +6073,103 @@ RelationAllowedToGenerateXLogRecord(Relation relation)
 		return true;
 
 	return false;
+}
+
+/*
+ * Mask a heap page before performing consistency checks on it.
+ */
+void
+heap_mask(char *pagedata, BlockNumber blkno)
+{
+	Page		page = (Page) pagedata;
+	OffsetNumber off;
+
+	mask_page_lsn_and_checksum(page);
+
+	mask_page_hint_bits(page);
+	mask_unused_space(page);
+
+	for (off = 1; off <= PageGetMaxOffsetNumber(page); off++)
+	{
+		ItemId		iid = PageGetItemId(page, off);
+		char	   *page_item;
+
+		page_item = (char *) (page + ItemIdGetOffset(iid));
+
+		if (ItemIdIsNormal(iid))
+		{
+
+			HeapTupleHeader page_htup = (HeapTupleHeader) page_item;
+
+			/*
+			 * During normal operation, the ctid is used to follow the update
+			 * chain, to find the latest tuple version, if a READ COMMITTED
+			 * transaction tries to update the updated tuple. But after
+			 * restart and WAL replay, there cannot be any live transactions
+			 * that would see the old tuple version. That's why during WAL
+			 * redo ctid is just set to itself. Hence for MOVED case set
+			 * t_ctid to current block number and self offset number to ignore
+			 * any inconsistency.
+			 */
+			if (page_htup->t_infomask & HEAP_MOVED)
+			{
+				ItemPointerSet(&page_htup->t_ctid, blkno, off);
+			}
+
+			/*
+			 * If xmin of a tuple is not yet frozen, we should ignore
+			 * differences in hint bits, since they can be set without
+			 * emitting WAL.
+			 */
+			if (!(((page_htup)->t_infomask & (HEAP_XMIN_FROZEN)) == HEAP_XMIN_FROZEN))
+				page_htup->t_infomask &= ~HEAP_XACT_MASK;
+			else
+			{
+				/* Still we need to mask xmax hint bits. */
+				page_htup->t_infomask &= ~HEAP_XMAX_INVALID;
+				page_htup->t_infomask &= ~HEAP_XMAX_COMMITTED;
+			}
+
+			/* mask out GPDB specific hint-bits */
+			page_htup->t_infomask2 &= ~HEAP_XMIN_DISTRIBUTED_SNAPSHOT_IGNORE;
+			page_htup->t_infomask2 &= ~HEAP_XMAX_DISTRIBUTED_SNAPSHOT_IGNORE;
+
+			/*
+			 * During replay, we set Command Id to FirstCommandId. Hence, mask
+			 * it. See heap_xlog_insert() for details.
+			 */
+			page_htup->t_choice.t_heap.t_field3.t_cid = MASK_MARKER;
+
+#if PG_VERSION_NUM >= 90500
+			/*
+			 * For a speculative tuple, heap_insert() does not set ctid in the
+			 * caller-passed heap tuple itself, leaving the ctid field to
+			 * contain a speculative token value - a per-backend monotonically
+			 * increasing identifier. Besides, it does not WAL-log ctid under
+			 * any circumstances.
+			 *
+			 * During redo, heap_xlog_insert() sets t_ctid to current block
+			 * number and self offset number. It doesn't care about any
+			 * speculative insertions in master. Hence, we set t_ctid to
+			 * current block number and self offset number to ignore any
+			 * inconsistency.
+			 */
+			if (HeapTupleHeaderIsSpeculative(page_htup))
+				ItemPointerSet(&page_htup->t_ctid, blkno, off);
+#endif
+		}
+
+		/*
+		 * Ignore any padding bytes after the tuple, when the length of the
+		 * item is not MAXALIGNed.
+		 */
+		if (ItemIdHasStorage(iid))
+		{
+			int			len = ItemIdGetLength(iid);
+			int			padlen = MAXALIGN(len) - len;
+
+			if (padlen > 0)
+				memset(page_item + len, MASK_MARKER, padlen);
+		}
+	}
 }

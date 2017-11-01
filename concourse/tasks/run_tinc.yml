@@ -1,0 +1,15 @@
+platform: linux
+inputs:
+ - name: ccp_src
+ - name: cluster_env_files
+run:
+  path: bash
+  args:
+  - -c
+  - |
+    set -ex
+    ccp_src/aws/setup_ssh_to_cluster.sh
+    if [ -n "$PRE_TEST_SCRIPT" ]; then
+      ssh -t mdw "$CUSTOM_ENV $PRE_TEST_SCRIPT"
+    fi
+    ssh -t mdw "$CUSTOM_ENV bash /home/gpadmin/gpdb_src/concourse/scripts/run_tinc_test.sh \"$TINC_TARGET\""

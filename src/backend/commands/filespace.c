@@ -3,7 +3,12 @@
  * filespace.c
  *	  Commands to manipulate filespaces
  *
- * Copyright (c) 2009-2010 Greenplum Inc
+ * Portions Copyright (c) 2009-2010 Greenplum Inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/commands/filespace.c
  *
  *-------------------------------------------------------------------------
  */
@@ -1187,7 +1192,7 @@ add_catalog_filespace_entry(Relation rel, Oid fsoid, int16 dbid, char *location)
 
 	evalues[Anum_pg_filespace_entry_fsedbid - 1] = Int16GetDatum(dbid);
 	evalues[Anum_pg_filespace_entry_fselocation - 1] =
-				DirectFunctionCall1(textin, CStringGetDatum(location));
+		CStringGetTextDatum(location);
 
 	tuple = heap_form_tuple(RelationGetDescr(rel), evalues, enulls);
 

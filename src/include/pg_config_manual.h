@@ -6,46 +6,9 @@
  * for developers.	If you edit any of these, be sure to do a *full*
  * rebuild (and an initdb if noted).
  *
- * $PostgreSQL: pgsql/src/include/pg_config_manual.h,v 1.27 2007/06/08 18:23:53 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/pg_config_manual.h,v 1.30 2008/03/27 03:57:34 tgl Exp $
  *------------------------------------------------------------------------
  */
-
-/*
- * Size of a disk block --- this also limits the size of a tuple.  You
- * can set it bigger if you need bigger tuples (although TOAST should
- * reduce the need to have large tuples, since fields can be spread
- * across multiple tuples).
- *
- * BLCKSZ must be a power of 2.  The maximum possible value of BLCKSZ
- * is currently 2^15 (32768).  This is determined by the 15-bit widths
- * of the lp_off and lp_len fields in ItemIdData (see
- * include/storage/itemid.h).
- *
- * Changing BLCKSZ requires an initdb.
- */
-#define BLCKSZ	32768
-
-#if BLCKSZ < 1024
-#error BLCKSZ must be >= 1024
-#endif
-
-/*
- * RELSEG_SIZE is the maximum number of blocks allowed in one disk
- * file.  Thus, the maximum size of a single file is RELSEG_SIZE *
- * BLCKSZ; relations bigger than that are divided into multiple files.
- *
- * RELSEG_SIZE * BLCKSZ must be less than your OS' limit on file size.
- * This is often 2 GB or 4GB in a 32-bit operating system, unless you
- * have large file support enabled.  By default, we make the limit 1
- * GB to avoid any possible integer-overflow problems within the OS.
- * A limit smaller than necessary only means we divide a large
- * relation into more chunks than necessary, so it seems best to err
- * in the direction of a small limit.  (Besides, a power-of-2 value
- * saves a few cycles in md.c.)
- *
- * Changing RELSEG_SIZE requires an initdb.
- */
-#define RELSEG_SIZE (0x40000000 / BLCKSZ)
 
 /*
  * Size of a WAL file block.  This need have no particular relation to BLCKSZ.
@@ -99,6 +62,17 @@
 #define INDEX_MAX_KEYS		32
 
 /*
+ * Set the upper and lower bounds of sequence values.
+ */
+#ifndef INT64_IS_BUSTED
+#define SEQ_MAXVALUE	INT64CONST(0x7FFFFFFFFFFFFFFF)
+#else							/* INT64_IS_BUSTED */
+#define SEQ_MAXVALUE	((int64) 0x7FFFFFFF)
+#endif   /* INT64_IS_BUSTED */
+
+#define SEQ_MINVALUE	(-SEQ_MAXVALUE)
+
+/*
  * Number of spare LWLocks to allocate for user-defined add-on code.
  */
 #define NUM_USER_DEFINED_LWLOCKS	4
@@ -110,16 +84,6 @@
  * semaphores have to be used.
  */
 #define NUM_ATOMICS_SEMAPHORES      64
-
-/*
- * Define this to make libpgtcl's "pg_result -assign" command process
- * C-style backslash sequences in returned tuple data and convert
- * PostgreSQL array values into Tcl lists.	CAUTION: This conversion
- * is *wrong* unless you install the routines in
- * contrib/string/string_io to make the server produce C-style
- * backslash sequences in the first place.
- */
-/* #define TCL_ARRAYS */
 
 /*
  * Define this if you want psql to _always_ ask for a username and a
@@ -326,3 +290,10 @@
 #ifdef _AIX
 #define _ALL_SOURCE
 #endif
+
+/*
+ * Greenplum replication configuration file name.
+ * This file will be used to store values of replication GUCs
+ * set by set_gp_replication_config()
+ */
+#define GP_REPLICATION_CONFIG_FILENAME "gp_replication.conf"

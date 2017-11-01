@@ -5,6 +5,7 @@
  *
  *
  * Portions Copyright (c) 2005-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -18,6 +19,7 @@
 #include "nodes/plannodes.h"
 #include "nodes/relation.h"
 #include "optimizer/clauses.h" /* AggClauseCounts */
+#include "utils/uri.h"
 
 /* GUC parameters */
 #define DEFAULT_CURSOR_TUPLE_FRACTION 1.0 /* assume all rows will be fetched */
@@ -99,14 +101,12 @@ extern Plan *make_distinctaggs_for_rollup(PlannerInfo *root, bool is_agg,
 extern Plan *window_planner(PlannerInfo *root, double tuple_fraction, List **pathkeys_ptr);
 extern RangeTblEntry *package_plan_as_rte(Query *query, Plan *plan, Alias *eref, List *pathkeys);
 extern Value *get_tle_name(TargetEntry *tle, List* rtable, const char *default_name);
-extern bool contain_windowref(Node *node, void *context);
-extern bool window_edge_is_delayed(WindowFrameEdge *edge);
 extern Plan *wrap_plan(PlannerInfo *root, Plan *plan, Query *query, List **p_pathkeys,
        const char *alias_name, List *col_names, Query **query_p);
 
 
 /*
- * prototype for plan/plangroupexp.c
+ * prototype for plan/plangroupext.c
  */
 extern Plan *plan_grouping_extension(PlannerInfo *root,
 									 Path *path,
@@ -141,16 +141,13 @@ extern Sort *make_sort_from_sortclauses(PlannerInfo *root, List *sortcls,
 extern Sort *make_sort_from_groupcols(PlannerInfo *root, List *groupcls,
 									  AttrNumber *grpColIdx, bool appendGrouping,
 									  Plan *lefttree);
-extern Sort *make_sort_from_reordered_groupcols(PlannerInfo *root,
-												List *groupcls,
-												AttrNumber *orig_grpColIdx,
-												AttrNumber *new_grpColIdx,
-												TargetEntry *grouping,
-												TargetEntry *groupid,
-												int req_ngrpkeys,
-												Plan *lefttree);
 extern List *reconstruct_group_clause(List *orig_groupClause, List *tlist,
 						 AttrNumber *grpColIdx, int numcols);
+
+extern Motion *make_motion(PlannerInfo *root, Plan *lefttree, List *sortPathKeys, bool useExecutorVarFormat);
+extern Sort *make_sort(PlannerInfo *root, Plan *lefttree, int numCols,
+		  AttrNumber *sortColIdx, Oid *sortOperators, bool *nullsFirst,
+		  double limit_tuples);
 
 extern Agg *make_agg(PlannerInfo *root, List *tlist, List *qual,
 					 AggStrategy aggstrategy, bool streaming,
@@ -178,9 +175,11 @@ extern MergeJoin *make_mergejoin(List *tlist,
 			   bool *mergenullsfirst,
 			   Plan *lefttree, Plan *righttree,
 			   JoinType jointype);
-extern Window *make_window(PlannerInfo *root, List *tlist,
-			int numPartCols, AttrNumber *partColIdx, Oid *partOperators,
-			List *windowKeys, Plan *lefttree);
+extern WindowAgg *make_windowagg(PlannerInfo *root, List *tlist,
+			   int partNumCols, AttrNumber *partColIdx, Oid *partOperators,
+			   int ordNumCols, AttrNumber *ordColIdx, Oid *ordOperators,
+			   int frameOptions, Node *startOffset, Node *endOffset,
+			   Plan *lefttree);
 extern Material *make_material(Plan *lefttree);
 extern Plan *materialize_finished_plan(PlannerInfo *root, Plan *subplan);
 extern Unique *make_unique(Plan *lefttree, List *distinctList);
@@ -209,6 +208,8 @@ extern Plan *add_agg_cost(PlannerInfo *root, Plan *plan,
 		 int numAggs, int transSpace);
 extern Plan *plan_pushdown_tlist(PlannerInfo *root, Plan *plan, List *tlist);      /*CDB*/
 
+extern List *create_external_scan_uri_list(struct ExtTableEntry *extEntry, bool *ismasteronly);
+
 /*
  * prototypes for plan/initsplan.c
  */
@@ -217,7 +218,6 @@ extern int	join_collapse_limit;
 
 extern void add_base_rels_to_query(PlannerInfo *root, Node *jtnode);
 extern void build_base_rel_tlists(PlannerInfo *root, List *final_tlist);
-extern void add_IN_vars_to_tlists(PlannerInfo *root);
 extern void add_vars_to_targetlist(PlannerInfo *root, List *vars,
 					   Relids where_needed);
 extern List *deconstruct_jointree(PlannerInfo *root);

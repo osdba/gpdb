@@ -4,11 +4,12 @@
  *	  Convenience routines for common queries in the system catalog cache.
  *
  * Portions Copyright (c) 2007-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/cache/lsyscache.c,v 1.155.2.1 2010/07/09 22:58:01 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/cache/lsyscache.c,v 1.156 2008/03/25 22:42:44 tgl Exp $
  *
  * NOTES
  *	  Eventually, the index information should go through here, too.
@@ -1911,6 +1912,31 @@ func_data_access(Oid funcid)
 
 	result = DatumGetChar(
 		SysCacheGetAttr(PROCOID, tp, Anum_pg_proc_prodataaccess, &isnull));
+	ReleaseSysCache(tp);
+
+	Assert(!isnull);
+	return result;
+}
+
+/*
+ * func_exec_location
+ *		Given procedure id, return the function's proexeclocation field
+ */
+char
+func_exec_location(Oid funcid)
+{
+	HeapTuple	tp;
+	char		result;
+	bool		isnull;
+
+	tp = SearchSysCache(PROCOID,
+						ObjectIdGetDatum(funcid),
+						0, 0, 0);
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for function %u", funcid);
+
+	result = DatumGetChar(
+		SysCacheGetAttr(PROCOID, tp, Anum_pg_proc_proexeclocation, &isnull));
 	ReleaseSysCache(tp);
 
 	Assert(!isnull);

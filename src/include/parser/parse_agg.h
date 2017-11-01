@@ -17,12 +17,11 @@
 
 extern void transformAggregateCall(ParseState *pstate, Aggref *agg, 
                                    List *agg_order);
-extern void transformWindowFuncCall(ParseState *pstate, WindowRef *wind);
+extern void transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
+						WindowDef *windef);
 
 extern void parseCheckAggregates(ParseState *pstate, Query *qry);
-extern void parseProcessWindFuncs(ParseState *pstate, Query *qry);
-extern void transformWindowSpec(ParseState *pstate, WindowSpec *spec);
-extern void transformWindowSpecExprs(ParseState *pstate);
+extern void parseCheckWindowFuncs(ParseState *pstate, Query *qry);
 
 extern void build_aggregate_fnexprs(Oid *agg_input_types,
 						int agg_num_inputs,
@@ -39,7 +38,6 @@ extern void build_aggregate_fnexprs(Oid *agg_input_types,
 						Expr **invtransfnexpr,
 						Expr **invprelimfnexpr);
 
-extern bool checkExprHasWindFuncs(Node *node);
 extern bool checkExprHasGroupExtFuncs(Node *node);
 
 #endif   /* PARSE_AGG_H */

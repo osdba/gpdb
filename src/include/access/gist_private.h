@@ -284,6 +284,7 @@ extern void gist_xlog_startup(void);
 extern void gist_xlog_cleanup(void);
 extern bool gist_safe_restartpoint(void);
 extern IndexTuple gist_form_invalid_tuple(BlockNumber blkno);
+extern void gist_mask(char *pagedata, BlockNumber blkno);
 
 extern XLogRecData *formUpdateRdata(Relation r, Buffer buffer,
 				OffsetNumber *todelete, int ntodelete,
@@ -299,7 +300,7 @@ extern XLogRecPtr gistxlogInsertCompletion(RelFileNode node, ItemPointerData *ke
 
 /* gistget.c */
 extern Datum gistgettuple(PG_FUNCTION_ARGS);
-extern Datum gistgetmulti(PG_FUNCTION_ARGS);
+extern Datum gistgetbitmap(PG_FUNCTION_ARGS);
 
 /* gistutil.c */
 

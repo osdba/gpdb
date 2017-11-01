@@ -1,14 +1,12 @@
 #
 # Common make rules for backend
 #
-# $PostgreSQL: pgsql/src/backend/common.mk,v 1.8 2008/09/05 12:11:18 petere Exp $
+# $PostgreSQL: pgsql/src/backend/common.mk,v 1.7 2008/03/17 18:24:56 petere Exp $
 #
 
 # When including this file, set OBJS to the object files created in
 # this directory and SUBDIRS to subdirectories containing more things
 # to build.
-
-PARTIAL_LINKING=yes
 
 ifdef PARTIAL_LINKING
 # old style: linking using SUBSYS.o
@@ -30,7 +28,7 @@ SUBSYS.o: $(SUBDIROBJS) $(OBJS)
 
 objfiles.txt: Makefile $(SUBDIROBJS) $(OBJS)
 # Don't rebuild the list if only the OBJS have changed.
-	$(if $(filter-out $(OBJS),$?),( $(if $(SUBDIROBJS),cat $(SUBDIROBJS); )echo $(addprefix $(subdir)/,$(OBJS)) ) >$@,touch $@)
+	$(if $(filter-out $(OBJS),$?),( $(if $(SUBDIROBJS),cat $(SUBDIROBJS); )echo $(subst src/backend/../../,,$(addprefix $(subdir)/,$(OBJS))) ) >$@,touch $@)
 
 # make function to expand objfiles.txt contents
 expand_subsys = $(foreach file,$(1),$(if $(filter %/objfiles.txt,$(file)),$(patsubst ../../src/backend/%,%,$(addprefix $(top_builddir)/,$(shell cat $(file)))),$(file)))
@@ -47,7 +45,7 @@ clean-local:
 ifdef SUBDIRS
 	for dir in $(SUBDIRS); do $(MAKE) -C $$dir clean || exit; done
 endif
-	rm -f objfiles.txt SUBSYS.o $(OBJS)
+	rm -f $(subsysfilename) $(OBJS)
 	@if [ -d $(CURDIR)/test ]; then $(MAKE) -C $(CURDIR)/test clean; fi
 
 

@@ -4,6 +4,7 @@
  *	  routines to manage per-process shared memory data structure
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -43,6 +44,7 @@
 #include "miscadmin.h"
 #include "postmaster/autovacuum.h"
 #include "replication/syncrep.h"
+#include "replication/walsender.h"
 #include "storage/ipc.h"
 #include "storage/spin.h"
 #include "storage/sinval.h"
@@ -260,6 +262,14 @@ InitProcess(void)
 	int			i;
 
 	/*
+	 * Autovacuum and WAL sender processes are marked as GP_ROLE_UTILITY to
+	 * prevent unwanted GP_ROLE_DISPATCH MyProc settings such as mppSessionId
+	 * being valid and mppIsWriter set to true.
+	 */
+	if (IsAutoVacuumWorkerProcess() || am_walsender)
+		Gp_role = GP_ROLE_UTILITY;
+
+	/*
 	 * ProcGlobal should be set up already (if we are a backend, we inherit
 	 * this by fork() or EXEC_BACKEND mechanism from the postmaster).
 	 */
@@ -373,8 +383,7 @@ InitProcess(void)
 	MyProc->waitLock = NULL;
 	MyProc->waitProcLock = NULL;
 	MyProc->resWaiting = false;
-	MyProc->resGranted = false;
-	MyProc->resSlotId = -1;
+	MyProc->resSlot = NULL;
 	for (i = 0; i < NUM_LOCK_PARTITIONS; i++)
 		SHMQueueInit(&(MyProc->myProcLocks[i]));
 

@@ -1280,7 +1280,7 @@ CQueryMutators::PqueryNormalizeHaving
 		pqueryNewSubquery->targetList = NIL;
 
 		pqueryNewSubquery->hasAggs = false;
-		pqueryNewSubquery->hasWindFuncs = false;
+		pqueryNewSubquery->hasWindowFuncs = false;
 		pqueryNewSubquery->hasSubLinks = false;
 
 		ListCell *plc = NULL;
@@ -1334,13 +1334,9 @@ CQueryMutators::PqueryNormalize
 	GPOS_ASSERT(NULL == pqueryEliminateDistinct->distinctClause);
 	gpdb::GPDBFree(pqueryResolveJoinVarReferences);
 
-	// fix window frame edge boundary
-	Query *pqueryFixedWindowFrameEdge = CQueryMutators::PqueryFixWindowFrameEdgeBoundary(pqueryEliminateDistinct);
-	gpdb::GPDBFree(pqueryEliminateDistinct);
-
 	// normalize window operator's project list
-	Query *pqueryWindowPlNormalized = CQueryMutators::PqueryNormalizeWindowPrL(pmp, pmda, pqueryFixedWindowFrameEdge);
-	gpdb::GPDBFree(pqueryFixedWindowFrameEdge);
+	Query *pqueryWindowPlNormalized = CQueryMutators::PqueryNormalizeWindowPrL(pmp, pmda, pqueryEliminateDistinct);
+	gpdb::GPDBFree(pqueryEliminateDistinct);
 
 	// pull-up having quals into a select
 	Query *pqueryHavingNormalized = CQueryMutators::PqueryNormalizeHaving(pmp, pmda, pqueryWindowPlNormalized);
@@ -1595,7 +1591,7 @@ CQueryMutators::FNeedsWindowPrLNormalization
 	const Query *pquery
 	)
 {
-	if (!pquery->hasWindFuncs)
+	if (!pquery->hasWindowFuncs)
 	{
 		return false;
 	}
@@ -1605,7 +1601,7 @@ CQueryMutators::FNeedsWindowPrLNormalization
 	{
 		TargetEntry *pte  = (TargetEntry*) lfirst(plc);
 
-		if (!CTranslatorUtils::FWindowSpec( (Node *) pte->expr, pquery->windowClause, pquery->targetList) && !IsA(pte->expr, WindowRef) && !IsA(pte->expr, Var))
+		if (!CTranslatorUtils::FWindowSpec( (Node *) pte->expr, pquery->windowClause, pquery->targetList) && !IsA(pte->expr, WindowFunc) && !IsA(pte->expr, Var))
 		{
 			// computed columns in the target list that is not
 			// used in the order by or partition by of the window specification(s)
@@ -1614,60 +1610,6 @@ CQueryMutators::FNeedsWindowPrLNormalization
 	}
 
 	return false;
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CQueryMutators::PqueryFixWindowFrameEdgeBoundary
-//
-//	@doc:
-//		Fix window frame edge boundary when its value is defined by a subquery
-//---------------------------------------------------------------------------
-Query *
-CQueryMutators::PqueryFixWindowFrameEdgeBoundary
-	(
-	const Query *pquery
-	)
-{
-	Query *pqueryNew = (Query *) gpdb::PvCopyObject(const_cast<Query*>(pquery));
-
-	List *plWindowClause = pqueryNew->windowClause;
-	ListCell *plcWindowCl = NULL;
-	ForEach (plcWindowCl, plWindowClause)
-	{
-		WindowSpec *pwindowspec = (WindowSpec*) lfirst(plcWindowCl);
-		if (NULL != pwindowspec->frame)
-		{
-			WindowFrame *pwindowframe = pwindowspec->frame;
-			if (NULL != pwindowframe->lead->val && IsA(pwindowframe->lead->val, SubLink))
-			{
-				if (WINDOW_BOUND_PRECEDING == pwindowframe->lead->kind)
-				{
-					pwindowframe->lead->kind = WINDOW_DELAYED_BOUND_PRECEDING;
-				}
-				else
-				{
-					GPOS_ASSERT(WINDOW_BOUND_FOLLOWING == pwindowframe->lead->kind);
-					pwindowframe->lead->kind = WINDOW_DELAYED_BOUND_FOLLOWING;
-				}
-			}
-
-			if (NULL != pwindowframe->trail->val && IsA(pwindowframe->trail->val, SubLink))
-			{
-				if (WINDOW_BOUND_PRECEDING == pwindowframe->trail->kind)
-				{
-					pwindowframe->trail->kind = WINDOW_DELAYED_BOUND_PRECEDING;
-				}
-				else
-				{
-					GPOS_ASSERT(WINDOW_BOUND_FOLLOWING == pwindowframe->trail->kind);
-					pwindowframe->trail->kind = WINDOW_DELAYED_BOUND_FOLLOWING;
-				}
-			}
-		}
-	}
-
-	return pqueryNew;
 }
 
 //---------------------------------------------------------------------------
@@ -1759,7 +1701,7 @@ CQueryMutators::PqueryNormalizeWindowPrL
 
 	GPOS_ASSERT(gpdb::UlListLength(pqueryNew->targetList) <= gpdb::UlListLength(pquery->targetList));
 
-	pqueryNew->hasWindFuncs = false;
+	pqueryNew->hasWindowFuncs = false;
 	ReassignSortClause(pqueryNew, pqueryDrdTbl);
 
 	return pqueryNew;
@@ -1795,14 +1737,14 @@ CQueryMutators::PnodeWindowPrLMutator
 	SContextGrpbyPlMutator *pctxWindowPrLMutator = (SContextGrpbyPlMutator *) pctx;
 	const ULONG ulResNo = gpdb::UlListLength(pctxWindowPrLMutator->m_plTENewGroupByQuery) + 1;
 
-	if (IsA(pnode, WindowRef))
+	if (IsA(pnode, WindowFunc))
 	{
 		// insert window operator into the derived table
         // and refer to it in the top-level query's target list
-		WindowRef *pwindowref = (WindowRef*) gpdb::PvCopyObject(pnode);
+		WindowFunc *pwindowfunc = (WindowFunc *) gpdb::PvCopyObject(pnode);
 
 		// get the function name and add it to the target list
-		CMDIdGPDB *pmdidFunc = GPOS_NEW(pctxWindowPrLMutator->m_pmp) CMDIdGPDB(pwindowref->winfnoid);
+		CMDIdGPDB *pmdidFunc = GPOS_NEW(pctxWindowPrLMutator->m_pmp) CMDIdGPDB(pwindowfunc->winfnoid);
 		const CWStringConst *pstr = CMDAccessorUtils::PstrWindowFuncName(pctxWindowPrLMutator->m_pmda, pmdidFunc);
 		pmdidFunc->Release();
 

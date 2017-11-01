@@ -4,8 +4,13 @@
  *	  routines to support manipulation of the pg_extprotocol relation
  *
  * Portions Copyright (c) 2011, Greenplum/EMC
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/catalog/pg_extprotocol.c
  *
  *-------------------------------------------------------------------------
  */
@@ -170,6 +175,8 @@ ExtProtocolCreate(const char *protocolName,
 
 	/* dependency on owner */
 	recordDependencyOnOwner(ExtprotocolRelationId, protOid, GetUserId());
+	/* dependency on extension */
+	recordDependencyOnCurrentExtension(&myself, false);
 
 	return protOid;
 }
@@ -216,8 +223,6 @@ ValidateProtocolFunction(List *fnName, ExtPtcFuncType fntype)
 {
 	Oid			fnOid;
 	bool		retset;
-	bool        retstrict;
-	bool        retordered;
 	Oid		   *true_oid_array;
 	Oid 	    actual_rettype;
 	Oid			desired_rettype;
@@ -240,8 +245,8 @@ ValidateProtocolFunction(List *fnName, ExtPtcFuncType fntype)
 	 * the function.
 	 */
 	fdresult = func_get_detail(fnName, NIL, nargs, inputTypes, false, false,
-							   &fnOid, &actual_rettype, &retset, &retstrict,
-							   &retordered, &nvargs, &true_oid_array, NULL);
+							   &fnOid, &actual_rettype, &retset,
+							   &nvargs, &true_oid_array, NULL);
 
 	/* only valid case is a normal function not returning a set */
 	if (fdresult != FUNCDETAIL_NORMAL || !OidIsValid(fnOid))

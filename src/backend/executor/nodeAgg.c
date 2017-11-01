@@ -70,11 +70,12 @@
  *	  standard Aggref itself.
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeAgg.c,v 1.156.2.1 2008/10/16 19:25:58 neilc Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeAgg.c,v 1.160 2008/08/25 22:42:32 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -91,11 +92,11 @@
 #include "lib/stringinfo.h"             /* StringInfo */
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_oper.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
@@ -103,7 +104,6 @@
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
-#include "utils/tuplesort_mk.h"
 #include "utils/datum.h"
 
 #include "cdb/cdbexplain.h"
@@ -233,83 +233,42 @@ initialize_aggregates(AggState *aggstate,
 			 * In case of rescan, maybe there could be an uncompleted sort
 			 * operation?  Clean it up if so.
 			 */
-			if(gp_enable_mk_sort)
+			if (peraggstate->sortstate)
+				tuplesort_end(peraggstate->sortstate);
+
+			/*
+			 * We use a plain Datum sorter when there's a single input column;
+			 * otherwise sort the full tuple.  (See comments for
+			 * process_ordered_aggregate_single.)
+			 */
+			if (peraggstate->numInputs == 1)
 			{
-				if (peraggstate->sortstate)
-					tuplesort_end_mk((Tuplesortstate_mk *) peraggstate->sortstate);
-
-				/*
-				 * We use a plain Datum sorter when there's a single input column;
-				 * otherwise sort the full tuple.  (See comments for
-				 * process_ordered_aggregate_single.)
-				 */
-				if (peraggstate->numInputs == 1)
-				{
-					peraggstate->sortstate =
-						tuplesort_begin_datum_mk(&aggstate->ss,
-												 peraggstate->evaldesc->attrs[0]->atttypid,
-												 peraggstate->sortOperators[0], false,
-												 PlanStateOperatorMemKB((PlanState *) aggstate), false);
-				}
-				else
-				{
-					bool	   *nullsFirstFlags = palloc0(peraggstate->numSortCols * sizeof(bool));
-
-					peraggstate->sortstate =
-						tuplesort_begin_heap_mk(&aggstate->ss,
-												peraggstate->evaldesc,
-												peraggstate->numSortCols, peraggstate->sortColIdx,
-												peraggstate->sortOperators, nullsFirstFlags,
-												PlanStateOperatorMemKB((PlanState *) aggstate), false);
-					pfree(nullsFirstFlags);
-				}
-
-				/* 
-				 * CDB: If EXPLAIN ANALYZE, let all of our tuplesort operations
-				 * share our Instrumentation object and message buffer.
-				 */
-				if (aggstate->ss.ps.instrument)
-					tuplesort_set_instrument_mk((Tuplesortstate_mk *) peraggstate->sortstate,
-							aggstate->ss.ps.instrument,
-							aggstate->ss.ps.cdbexplainbuf);
+				peraggstate->sortstate =
+					tuplesort_begin_datum(&aggstate->ss,
+										  peraggstate->evaldesc->attrs[0]->atttypid,
+										  peraggstate->sortOperators[0],
+										  peraggstate->sortNullsFirst[0],
+										  PlanStateOperatorMemKB((PlanState *) aggstate), false);
 			}
-			else /* gp_enable_mk_sort is off */
+			else
 			{
-				if (peraggstate->sortstate)
-					tuplesort_end((Tuplesortstate *) peraggstate->sortstate);
-
-				/*
-				 * We use a plain Datum sorter when there's a single input column;
-				 * otherwise sort the full tuple.  (See comments for
-				 * process_ordered_aggregate_single.)
-				 */
-				if (peraggstate->numInputs == 1)
-				{
-					peraggstate->sortstate =
-						tuplesort_begin_datum(peraggstate->evaldesc->attrs[0]->atttypid,
-											  peraggstate->sortOperators[0], false,
-											  PlanStateOperatorMemKB((PlanState *) aggstate), false);
-				}
-				else
-				{
-					bool	   *nullsFirstFlags = palloc0(peraggstate->numSortCols * sizeof(bool));
-
-					peraggstate->sortstate =
-						tuplesort_begin_heap(peraggstate->evaldesc,
-											 peraggstate->numSortCols, peraggstate->sortColIdx,
-											 peraggstate->sortOperators, nullsFirstFlags,
-											 PlanStateOperatorMemKB((PlanState *) aggstate), false);
-				}
-
-				/* 
-				 * CDB: If EXPLAIN ANALYZE, let all of our tuplesort operations
-				 * share our Instrumentation object and message buffer.
-				 */
-				if (aggstate->ss.ps.instrument)
-					tuplesort_set_instrument((Tuplesortstate *) peraggstate->sortstate,
-							aggstate->ss.ps.instrument,
-							aggstate->ss.ps.cdbexplainbuf);
+				peraggstate->sortstate =
+					tuplesort_begin_heap(&aggstate->ss,
+										 peraggstate->evaldesc,
+										 peraggstate->numSortCols, peraggstate->sortColIdx,
+										 peraggstate->sortOperators,
+										 peraggstate->sortNullsFirst,
+										 PlanStateOperatorMemKB((PlanState *) aggstate), false);
 			}
+
+			/*
+			 * CDB: If EXPLAIN ANALYZE, let all of our tuplesort operations
+			 * share our Instrumentation object and message buffer.
+			 */
+			if (aggstate->ss.ps.instrument)
+				tuplesort_set_instrument(peraggstate->sortstate,
+										 aggstate->ss.ps.instrument,
+										 aggstate->ss.ps.cdbexplainbuf);
 
 			/* CDB: Set enhanced sort options. */
 			{
@@ -318,14 +277,9 @@ initialize_aggregates(AggState *aggstate,
 				int 		sort_flags = gp_sort_flags; /* get the guc */
 				int         maxdistinct = gp_sort_max_distinct; /* get guc */
 
-				if(gp_enable_mk_sort)
-					cdb_tuplesort_init_mk((Tuplesortstate_mk *) peraggstate->sortstate, 
-							unique,
-							sort_flags, maxdistinct);
-				else
-					cdb_tuplesort_init((Tuplesortstate *) peraggstate->sortstate, 
-							unique,
-							sort_flags, maxdistinct);
+				cdb_tuplesort_init(peraggstate->sortstate,
+								   unique,
+								   sort_flags, maxdistinct);
 			}
 		}
 
@@ -518,11 +472,24 @@ advance_aggregates(AggState *aggstate, AggStatePerGroup pergroup,
 		bool isnull;
 		AggStatePerAgg peraggstate = &aggstate->peragg[aggno];
 		AggStatePerGroup pergroupstate = &pergroup[aggno];
+		ExprState  *filter = peraggstate->aggrefstate ? peraggstate->aggrefstate->aggfilter : NULL;
 		int			nargs;
 		Aggref	   *aggref = peraggstate->aggref;
 		PercentileExpr *perc = peraggstate->perc;
 		int			i;
 		TupleTableSlot *slot;
+
+		/* Skip anything FILTERed out */
+		if (filter)
+		{
+			bool		isnull;
+			Datum		res;
+
+			res = ExecEvalExprSwitchContext(filter, aggstate->tmpcontext,
+											&isnull, NULL);
+			if (isnull || !DatumGetBool(res))
+				continue;
+		}
 
 		if (aggref)
 			nargs = list_length(aggref->args);
@@ -567,23 +534,12 @@ advance_aggregates(AggState *aggstate, AggStatePerGroup pergroup,
 			{
 				value = slot_getattr(slot, 1, &isnull);
 				
-				if (gp_enable_mk_sort)
-					tuplesort_putdatum_mk((Tuplesortstate_mk*) peraggstate->sortstate,
-									   value,
-									   isnull);
-				else 
-					tuplesort_putdatum((Tuplesortstate*) peraggstate->sortstate,
-									   value,
-									   isnull);
+				tuplesort_putdatum(peraggstate->sortstate,
+								   value, isnull);
 			}
 			else
 			{
-				if (gp_enable_mk_sort)
-					tuplesort_puttupleslot_mk((Tuplesortstate_mk*) peraggstate->sortstate, 
-											  slot);
-				else 
-					tuplesort_puttupleslot((Tuplesortstate*) peraggstate->sortstate, 
-										   slot);
+				tuplesort_puttupleslot(peraggstate->sortstate, slot);
 			}
 		}
 		else
@@ -662,10 +618,7 @@ process_ordered_aggregate_single(AggState *aggstate,
 
 	Assert(peraggstate->numInputs == 1);
 
-	if(gp_enable_mk_sort)
-		tuplesort_performsort_mk((Tuplesortstate_mk *) peraggstate->sortstate);
-	else
-		tuplesort_performsort((Tuplesortstate *) peraggstate->sortstate);
+	tuplesort_performsort(peraggstate->sortstate);
 
 	/* Load the column into argument 1 (arg 0 will be transition value) */
 	newVal = fcinfo.arg + 1;
@@ -677,12 +630,7 @@ process_ordered_aggregate_single(AggState *aggstate,
 	 * pfree them when they are no longer needed.
 	 */
 
-	while (
-		   gp_enable_mk_sort ? 
-		   tuplesort_getdatum_mk((Tuplesortstate_mk *)peraggstate->sortstate, true, newVal, isNull)
-		   :
-		   tuplesort_getdatum((Tuplesortstate *)peraggstate->sortstate, true, newVal, isNull)
-		   )
+	while (tuplesort_getdatum(peraggstate->sortstate, true, newVal, isNull))
 	{
 		/*
 		 * Clear and select the working context for evaluation of the equality
@@ -724,10 +672,7 @@ process_ordered_aggregate_single(AggState *aggstate,
 	if (!oldIsNull && !peraggstate->inputtypeByVal)
 		pfree(DatumGetPointer(oldVal));
 
-	if(gp_enable_mk_sort)
-		tuplesort_end_mk((Tuplesortstate_mk *) peraggstate->sortstate);
-	else
-		tuplesort_end((Tuplesortstate *) peraggstate->sortstate);
+	tuplesort_end(peraggstate->sortstate);
 
 	peraggstate->sortstate = NULL;
 }
@@ -753,19 +698,11 @@ process_ordered_aggregate_multi(AggState *aggstate,
 	int			numArguments = peraggstate->numArguments;
 	int			i;
 
-	if (gp_enable_mk_sort)
-		tuplesort_performsort_mk((Tuplesortstate_mk *) peraggstate->sortstate);
-	else
-		tuplesort_performsort((Tuplesortstate *) peraggstate->sortstate);
+	tuplesort_performsort(peraggstate->sortstate);
 
 	ExecClearTuple(slot);
 
-	while (
-		gp_enable_mk_sort ?
-		tuplesort_gettupleslot_mk((Tuplesortstate_mk *)peraggstate->sortstate, true, slot)
-		:
-		tuplesort_gettupleslot((Tuplesortstate *)peraggstate->sortstate, true, slot)
-		)
+	while (tuplesort_gettupleslot(peraggstate->sortstate, true, slot))
 	{
 		/*
 		 * Extract the first numArguments as datums to pass to the transfn.
@@ -790,10 +727,7 @@ process_ordered_aggregate_multi(AggState *aggstate,
 		ExecClearTuple(slot);
 	}
 
-	if (gp_enable_mk_sort)
-		tuplesort_end_mk((Tuplesortstate_mk *) peraggstate->sortstate);
-	else
-		tuplesort_end((Tuplesortstate *) peraggstate->sortstate);
+	tuplesort_end(peraggstate->sortstate);
 
 	peraggstate->sortstate = NULL;
 }
@@ -1404,6 +1338,10 @@ agg_retrieve_direct(AggState *aggstate)
 		{
 			if (!node->lastAgg && is_middle_rollup_agg)
 				return outerslot;
+
+			/* At this point we are done scanning the agg state because a null outerslot was produced above */
+			if(aggstate->agg_done)
+				return NULL;
 
 			/*
 			 * For the top-level of a rollup, we need to finalize
@@ -2192,6 +2130,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				(AttrNumber *) palloc(numSortCols * sizeof(AttrNumber));
 			peraggstate->sortOperators =
 				(Oid *) palloc(numSortCols * sizeof(Oid));
+			peraggstate->sortNullsFirst =
+				(bool *) palloc(numSortCols * sizeof(bool));
 
 			i = 0;
 			foreach(lc, sortlist)
@@ -2205,6 +2145,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 
 				peraggstate->sortColIdx[i] = tle->resno;
 				peraggstate->sortOperators[i] = sortcl->sortop;
+				peraggstate->sortNullsFirst[i] = sortcl->nulls_first;
 				i++;
 			}
 			Assert(i == numSortCols);
@@ -2428,7 +2369,7 @@ GetAggInitVal(Datum textInitVal, Oid transtype)
 	Datum		initVal;
 
 	getTypeInputInfo(transtype, &typinput, &typioparam);
-	strInitVal = DatumGetCString(DirectFunctionCall1(textout, textInitVal));
+	strInitVal = TextDatumGetCString(textInitVal);
 	initVal = OidInputFunctionCall(typinput, strInitVal,
 								   typioparam, -1);
 	pfree(strInitVal);
@@ -2587,7 +2528,8 @@ AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
  * TODO: remove the macro after we upgrade GPDB to PG8.4 due to WindowAggState
  *		 is not supported yet.
  */
-#if PG_VERSION_NUM >= 80400
+/* GPDB_84_MERGE_FIXME */
+#if 0
 	if (fcinfo->context && IsA(fcinfo->context, WindowAggState))
 	{
 		if (aggcontext)
@@ -2894,15 +2836,7 @@ ExecEagerFreeAgg(AggState *node)
 			continue;
 		}
 
-		if (gp_enable_mk_sort)
-		{
-			tuplesort_end_mk((Tuplesortstate_mk *) peraggstate->sortstate);
-		}
-
-		else
-		{
-			tuplesort_end((Tuplesortstate *) peraggstate->sortstate);
-		}
+		tuplesort_end(peraggstate->sortstate);
 
 		peraggstate->sortstate = NULL;
 	}

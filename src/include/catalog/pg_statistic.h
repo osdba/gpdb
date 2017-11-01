@@ -5,11 +5,12 @@
  *	  along with the relation's initial contents.
  *
  *
- * Copyright (c) 2006-2010, Greenplum inc.
+ * Portions Copyright (c) 2006-2010, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/catalog/pg_statistic.h,v 1.34 2008/01/01 19:45:57 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/catalog/pg_statistic.h,v 1.35 2008/03/27 03:57:34 tgl Exp $
  *
  * NOTES
  *	  the genbki.sh script reads this file and generates .bki
@@ -23,10 +24,14 @@
 #include "catalog/genbki.h"
 
 /*
- * Keep C compiler happy with anyarray, below.	This will need to go elsewhere
- * if we ever use anyarray for more than pg_statistic.
+ * The CATALOG definition has to refer to the type of stavaluesN as
+ * "anyarray" so that bootstrap mode recognizes it.  There is no real
+ * typedef for that, however.  Since the fields are potentially-null and
+ * therefore can't be accessed directly from C code, there is no particular
+ * need for the C struct definition to show a valid field type --- instead
+ * we just make it int.
  */
-typedef struct varlena anyarray;
+#define anyarray int
 
 /* ----------------
  *		pg_statistic definition.  cpp turns this into
@@ -131,6 +136,9 @@ FOREIGN_KEY(staop1 REFERENCES pg_operator(oid));
 FOREIGN_KEY(staop2 REFERENCES pg_operator(oid));
 FOREIGN_KEY(staop3 REFERENCES pg_operator(oid));
 FOREIGN_KEY(staop4 REFERENCES pg_operator(oid));
+
+#undef anyarray
+
 
 /* ----------------
  *		Form_pg_statistic corresponds to a pointer to a tuple with
@@ -237,8 +245,6 @@ typedef FormData_pg_statistic *Form_pg_statistic;
  * their actual tuple positions.  The coefficient ranges from +1 to -1.
  */
 #define STATISTIC_KIND_CORRELATION	3
-
-/* quoting pg_authid and gp_configuration: */
 
 /*
  * The CATALOG definition has to refer to the type of log_time as

@@ -4,7 +4,12 @@
  *	  Header file for routines in cdbutil.c and results returned by
  *	  those routines.
  *
- * Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/include/cdb/cdbutil.h
  *
  *-------------------------------------------------------------------------
  */
@@ -24,9 +29,6 @@
 /* cdb_randint returns integer value between lower and upper inclusive */
 #define cdb_randint(upper,lower) \
 	( (int) floor( cdb_rand()*(((upper)-(lower))+0.999999) ) + (lower) )
-
-
-#include "c.h"
 
 /* --------------------------------------------------------------------------------------------------
  * Structure for MPP 2.0 database information
@@ -163,7 +165,6 @@ extern char *getDnsAddress(char *name, int port, int elevel);
 extern int16 master_standby_dbid(void);
 extern CdbComponentDatabaseInfo *dbid_get_dbinfo(int16 dbid);
 extern int16 contentid_get_dbid(int16 contentid, char role, bool getPreferredRoleNotCurrentRole);
-extern int16 my_mirror_dbid(void);
 
 /*
  * Returns the number of segments

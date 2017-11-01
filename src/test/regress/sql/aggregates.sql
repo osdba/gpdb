@@ -376,88 +376,40 @@ select string_agg(a,',') from (values('aaaa'),(null),('bbbb'),('cccc')) g(a);
 select string_agg(a,',') from (values(null),(null),('bbbb'),('cccc')) g(a);
 select string_agg(a,',') from (values(null),(null)) g(a);
 
--- array_agg tests
-SELECT array_agg(a order by a) as a_by_a from aggtest;
-SELECT array_agg(b order by b) as b_by_b from aggtest;
-SELECT array_agg(a order by a) as a_by_a, 
-       array_agg(a order by b) as a_by_b,
-       array_agg(b order by a) as b_by_a,
-       array_agg(b order by b) as b_by_b 
-  FROM aggtest;
+-- FILTER tests
 
--- Negative test cases for ordered aggregate syntax
-SELECT count(order by a) from aggtest;       -- zero parameter aggregate
-SELECT count(a order by a) from aggtest;     -- regular (non-orderd) aggregate
-SELECT abs(a order by a) from aggtest;       -- regular function
-SELECT a(aggtest order by a) from aggtest;   -- function-like column reference
-SELECT nosuchagg(a order by a) FROM aggtest; -- no such function
-SELECT lag(a order by a) from aggtest;       -- window function (no window clause)
-SELECT lag(a order by a) over (order by a) FROM aggtest;  -- window function
-SELECT count(a order by a) over (order by a) FROM aggtest;  -- window derived aggregate
-SELECT array_agg(a order by a) over (order by a) FROM aggtest; -- window derived ordered aggregate
+select min(unique1) filter (where unique1 > 100) from tenk1;
 
--- check for mpp-2687
-CREATE TEMPORARY TABLE mpp2687t (
-    dk text,
-    gk text
-) DISTRIBUTED BY (dk);
+select ten, sum(distinct four) filter (where four::text ~ '123') from onek a
+group by ten;
 
-CREATE VIEW mpp2687v AS
-    SELECT DISTINCT gk
-    FROM mpp2687t 
-    GROUP BY gk;
+select ten, sum(distinct four) filter (where four > 10) from onek a
+group by ten
+having exists (select 1 from onek b where sum(distinct a.four) = b.four);
 
-SELECT * FROM mpp2687v;
+select max(foo COLLATE "C") filter (where (bar collate "POSIX") > '0')
+from (values ('a', 'b')) AS v(foo,bar);
 
--- MPP-4617
-select case when ten < 5 then ten else ten * 2 end, count(distinct two), count(distinct four) from tenk1 group by 1;
-select ten, ten, count(distinct two), count(distinct four) from tenk1 group by 1,2;
+-- outer reference in FILTER (PostgreSQL extension)
+select (select count(*)
+        from (values (1)) t0(inner_c))
+from (values (2),(3)) t1(outer_c); -- inner query is aggregation query
+select (select count(*) filter (where outer_c <> 0)
+        from (values (1)) t0(inner_c))
+from (values (2),(3)) t1(outer_c); -- outer query is aggregation query
+select (select count(inner_c) filter (where outer_c <> 0)
+        from (values (1)) t0(inner_c))
+from (values (2),(3)) t1(outer_c); -- inner query is aggregation query
+select
+  (select max((select i.unique2 from tenk1 i where i.unique1 = o.unique1))
+     filter (where o.unique1 < 10))
+from tenk1 o;					-- outer query is aggregation query
 
---MPP-20151: distinct is transformed to a group-by
-select distinct two from tenk1 order by two;
-select distinct two, four from tenk1 order by two, four;
-select distinct two, max(two) over() from tenk1 order by two;
-select distinct two, sum(four) over() from tenk1 order by two;
-select distinct two, sum(four) from tenk1 group by two order by two;
-select distinct two, sum(four) from tenk1 group by two having sum(four) > 5000;
-select distinct t1.two, t2.two, t1.four, t2.four from tenk1 t1, tenk1 t2 where t1.hundred=t2.hundred order by t1.two, t1.four;
+-- subquery in FILTER clause (PostgreSQL extension)
+select sum(unique1) FILTER (WHERE
+  unique1 IN (SELECT unique1 FROM onek where unique1 < 100)) FROM tenk1;
 
-
--- Test for a planner bug we used to have, when this query gets planned
--- as a merge join. This should perform a merge join between 'l' and 'ps',
--- using both pk and sk as the merge keys. Due to the bug, the planner
--- used mix up the columns in the path keys, and used incorrect columns
--- as the merge keys. (This is a modified version of a TPC-H query)
-
-create table l (ok bigint, pk integer, sk integer, quantity numeric) distributed by (ok);
-create table ps (pk integer, sk integer, availqty integer) distributed by (pk);
-
-insert into l select g%5, 50-g, g, 5 from generate_series(1, 50) g;
-insert into ps select g, 50-g, 10 from generate_series(1, 25) g;
-
-select  g.pk, g.sk, ps.availqty
-from ps,
-     (select sum(l.quantity) as qty_sum, l.pk, l.sk
-      from l
-      group by l.pk, l.sk ) g
-where g.pk = ps.pk and g.sk = ps.sk
-and ps.availqty > g.qty_sum ;
-
--- the same, but force a merge join and sorted agg.
-set enable_hashagg=off;
-set enable_hashjoin=off;
-set enable_mergejoin=on;
-
-select  g.pk, g.sk, ps.availqty
-from ps,
-     (select sum(l.quantity) as qty_sum, l.pk, l.sk
-      from l
-      group by l.pk, l.sk ) g
-where g.pk = ps.pk and g.sk = ps.sk
-and ps.availqty > g.qty_sum ;
-
-reset enable_hashagg;
-reset enable_hashjoin;
-reset enable_mergejoin;
-
-drop table l, ps;
+-- exercise lots of aggregate parts with FILTER
+select aggfns(distinct a,b,c order by a,c using ~<~,b) filter (where a > 1)
+    from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
+    generate_series(1,2) i;

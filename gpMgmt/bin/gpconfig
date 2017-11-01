@@ -358,10 +358,11 @@ def do_change(options):
     pool.haltWork()
     pool.joinWorkers()
 
+    params = " ".join(sys.argv[1:])
     if failure:
-        LOGGER.error('finished with errors')
+        LOGGER.error("finished with errors, parameter string '%s'" % params)
     else:
-        LOGGER.info("completed successfully")
+        LOGGER.info("completed successfully with parameters '%s'" % params)
 
 
 def quote_string(guc, value):

@@ -72,17 +72,16 @@
                     session holding or waiting to hold a lock. For example:</p>
                 <p>
                     <codeblock>SELECT locktype, database, c.relname, l.relation, 
-l.transactionid, l.transaction, l.pid, l.mode, l.granted, 
+l.transactionid, l.pid, l.mode, l.granted, 
 a.current_query 
         FROM pg_locks l, pg_class c, pg_stat_activity a 
         WHERE l.relation=c.oid AND l.pid=a.procpid 
         ORDER BY c.relname;
 </codeblock>
                 </p>
-                <p>If you use resource queues for workload management, queries that are waiting in a
-                    queue will also show in <i>pg_locks</i>. To see how many queries are waiting to
-                    run from a resource queue, use the<i> gp_resqueue_status </i>system catalog
-                    view. For example:</p>
+                <p>If you use resource queues, queries that are waiting in a queue will also show in
+                        <i>pg_locks</i>. To see how many queries are waiting to run from a resource
+                    queue, use the<i> gp_resqueue_status </i>system catalog view. For example:</p>
                 <p>
                     <codeblock>SELECT * FROM gp_toolkit.gp_resqueue_status;
 </codeblock>

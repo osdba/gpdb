@@ -2,7 +2,12 @@
  *
  * cdbpersistentfilesysobj.c
  *
- * Copyright (c) 2009-2010, Greenplum inc
+ * Portions Copyright (c) 2009-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/cdb/cdbpersistentfilesysobj.c
  *
  *-------------------------------------------------------------------------
  */
@@ -2164,7 +2169,7 @@ PersistentFileSysObj_DoMirrorValidation(
 			char *primaryFilespaceLocation = NULL;
 			char *mirrorFilespaceLocation = NULL;
 
-			PersistentFilespace_GetPrimaryAndMirrorUnderLock(
+			PersistentFilespace_GetPrimaryAndMirror(
 													fsObjName->variant.filespaceOid,
 													&primaryFilespaceLocation,
 													&mirrorFilespaceLocation);

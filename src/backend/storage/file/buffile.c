@@ -4,11 +4,12 @@
  *	  Management of large buffered files, primarily temporary files.
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/storage/file/buffile.c,v 1.29 2008/01/01 19:45:51 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/storage/file/buffile.c,v 1.30 2008/03/10 20:06:27 tgl Exp $
  *
  * NOTES:
  *
@@ -291,7 +292,6 @@ BufFileDumpBuffer(BufFile *file, const void* buffer, Size nbytes)
 	{
 		bytestowrite = nbytes - wpos;
 
-
 		if (FileSeek(file->file, file->offset, SEEK_SET) != file->offset)
 		{
 			elog(ERROR, "could not seek in temporary file: %m");
@@ -523,9 +523,13 @@ BufFileSeek(BufFile *file, int fileno, off_t offset, int whence)
 			newOffset = (file->offset + file->pos) + offset;
 			break;
 
+#ifdef NOT_USED
+		case SEEK_END:
+			/* could be implemented, not needed currently */
+			break;
+#endif
 		default:
-			elog(LOG, "invalid whence: %d", whence);
-			Assert(false);
+			elog(ERROR, "invalid whence: %d", whence);
 			return EOF;
 	}
 

@@ -19,8 +19,8 @@ static void check_for_isn_and_int8_passing_mismatch(migratorContext *ctx,
 												Cluster whichCluster);
 static void check_for_reg_data_type_usage(migratorContext *ctx, Cluster whichCluster);
 static void check_external_partition(migratorContext *ctx);
-static void check_fts_fault_strategy(migratorContext *ctx);
 static void check_covering_aoindex(migratorContext *ctx);
+static void check_hash_partition_usage(migratorContext *ctx, Cluster whichCluster);
 
 
 /*
@@ -103,8 +103,8 @@ check_old_cluster(migratorContext *ctx, bool live_check,
 	check_for_reg_data_type_usage(ctx, CLUSTER_OLD);
 	check_for_isn_and_int8_passing_mismatch(ctx, CLUSTER_OLD);
 	check_external_partition(ctx);
-	check_fts_fault_strategy(ctx);
 	check_covering_aoindex(ctx);
+	check_hash_partition_usage(ctx, CLUSTER_OLD);
 
 	/* old = PG 8.3 checks? */
 	/*
@@ -353,6 +353,9 @@ set_locale_and_encoding(migratorContext *ctx, Cluster whichCluster)
 
 	conn = connectToServer(ctx, "template1", whichCluster);
 
+// GPDB_84_MERGE_FIXME: We haven't merged the per-db collations patch yet.
+// Re-enable this when we do.
+#if 0
 	/* for pg < 80400, we got the values from pg_controldata */
 	if (cluster_version >= 80400)
 	{
@@ -373,6 +376,7 @@ set_locale_and_encoding(migratorContext *ctx, Cluster whichCluster)
 
 		PQclear(res);
 	}
+#endif
 
 	res = executeQueryOrDie(ctx, conn,
 							"SELECT pg_catalog.pg_encoding_to_char(encoding) "
@@ -870,76 +874,6 @@ check_external_partition(migratorContext *ctx)
 }
 
 /*
- *	check_fts_fault_strategy
- *
- *	FTS fault strategies other than FILEREPLICATION 'f' and NONE 'n' are no
- *	longer supported, but we don't have an automated way to reconfigure the
- *	cluster so abort upgrade in case discovered.
- */
-static void
-check_fts_fault_strategy(migratorContext *ctx)
-{
-	ClusterInfo *old_cluster = &ctx->old;
-	char		query[QUERY_ALLOC];
-	char		output_path[MAXPGPATH];
-	FILE	   *script = NULL;
-	bool		found = false;
-	int			dbnum;
-
-	prep_status(ctx, "Checking for deprecated FTS fault strategies");
-
-	snprintf(output_path, sizeof(output_path), "%s/fault_strategies.txt",
-			 ctx->cwd);
-
-	snprintf(query, sizeof(query),
-			 "SELECT fault_strategy "
-			 "FROM   pg_catalog.gp_fault_strategy "
-			 "WHERE  fault_strategy NOT IN ('n','f');");
-
-	for (dbnum = 0; dbnum < old_cluster->dbarr.ndbs; dbnum++)
-	{
-		PGresult   *res;
-		int			ntups;
-		DbInfo	   *active_db = &old_cluster->dbarr.dbs[dbnum];
-		PGconn	   *conn;
-
-		conn = connectToServer(ctx, active_db->db_name, CLUSTER_OLD);
-		res = executeQueryOrDie(ctx, conn, query);
-
-		ntups = PQntuples(res);
-
-		if (ntups > 0)
-		{
-			found = true;
-
-			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
-				pg_log(ctx, PG_FATAL, "Could not create necessary file:  %s\n",
-					   output_path);
-
-			fprintf(script, "Deprecated fault strategy in database \"%s\"\n",
-					active_db->db_name);
-		}
-
-		PQclear(res);
-		PQfinish(conn);
-	}
-	if (found)
-	{
-		fclose(script);
-		pg_log(ctx, PG_REPORT, "fatal\n");
-		pg_log(ctx, PG_FATAL,
-			   "| Your installation contains a deprecated FTS fault strategy\n"
-			   "| configuration.  A list of database to reconfigure manually\n"
-			   "| before restarting upgrade is in the file:\n"
-			   "| \t%s\n\n", output_path);
-	}
-	else
-	{
-		check_ok(ctx);
-	}
-}
-
-/*
  *	check_covering_aoindex
  *
  *	A partitioned AO table which had an index created on the parent relation,
@@ -1054,4 +988,87 @@ check_covering_aoindex(migratorContext *ctx)
 	{
 		check_ok(ctx);
 	}
+}
+
+/*
+ *	check_hash_partition_usage()
+ *	8.3 -> 8.4
+ *	The hash algorithm was changed in 8.4, so upgrading is impossible. This
+ *	is basically the same problem as with hash indexes in PostgreSQL. Hash
+ *	partitioning was not officially supported in GPDB5, but better check just
+ *	in case someone has found the hidden GUC and used them anyway.
+ *
+ *	XXX: Actually, pg_dump outright fails on hash partitioned tables, so we
+ *	cannot support hash partitioned tables even on a same-version upgrade.
+ */
+void
+check_hash_partition_usage(migratorContext *ctx, Cluster whichCluster)
+{
+	ClusterInfo *active_cluster = (whichCluster == CLUSTER_OLD) ?
+	&ctx->old : &ctx->new;
+	int			dbnum;
+	FILE	   *script = NULL;
+	bool		found = false;
+	char		output_path[MAXPGPATH];
+
+	prep_status(ctx, "Checking for hash partitioned tables");
+
+	snprintf(output_path, sizeof(output_path), "%s/hash_partitioned_tables.txt",
+			 ctx->cwd);
+
+	for (dbnum = 0; dbnum < active_cluster->dbarr.ndbs; dbnum++)
+	{
+		PGresult   *res;
+		bool		db_used = false;
+		int			ntups;
+		int			rowno;
+		int			i_nspname,
+					i_relname;
+		DbInfo	   *active_db = &active_cluster->dbarr.dbs[dbnum];
+		PGconn	   *conn = connectToServer(ctx, active_db->db_name, whichCluster);
+
+		res = executeQueryOrDie(ctx, conn,
+								"SELECT n.nspname, c.relname "
+								"FROM pg_catalog.pg_partition p, pg_catalog.pg_class c, pg_catalog.pg_namespace n "
+								"WHERE p.parrelid = c.oid AND c.relnamespace = n.oid "
+								"AND parkind = 'h'");
+
+		ntups = PQntuples(res);
+		i_nspname = PQfnumber(res, "nspname");
+		i_relname = PQfnumber(res, "relname");
+		for (rowno = 0; rowno < ntups; rowno++)
+		{
+			found = true;
+			if (script == NULL && (script = fopen(output_path, "w")) == NULL)
+				pg_log(ctx, PG_FATAL, "Could not create necessary file:  %s\n", output_path);
+			if (!db_used)
+			{
+				fprintf(script, "Database:  %s\n", active_db->db_name);
+				db_used = true;
+			}
+			fprintf(script, "  %s.%s\n",
+					PQgetvalue(res, rowno, i_nspname),
+					PQgetvalue(res, rowno, i_relname));
+		}
+
+		PQclear(res);
+
+		PQfinish(conn);
+	}
+
+	if (found)
+	{
+		fclose(script);
+		pg_log(ctx, PG_REPORT, "fatal\n");
+		pg_log(ctx, PG_FATAL,
+			   "| Your installation contains hash partitioned tables.\n"
+			   "| Upgrading hash partitioned tables is not supported,\n"
+			   "| so this cluster cannot currently be upgraded.  You\n"
+			   "| can remove the problem tables and restart the\n"
+			   "| migration.  A list of the problem tables is in the\n"
+			   "| file:\n"
+			   "| \t%s\n\n", output_path);
+	}
+	else
+		check_ok(ctx);
 }

@@ -4,7 +4,8 @@
  *	  GPDB resource manager definitions.
  *
  *
- * Copyright (c) 2006-2017, Greenplum inc.
+ * Portions Copyright (c) 2006-2017, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  *
  * IDENTIFICATION
  *		src/include/utils/resource_manager.h
@@ -32,6 +33,9 @@ extern ResourceManagerPolicy Gp_resource_manager_policy;
 extern bool IsResQueueEnabled(void);
 extern bool IsResGroupEnabled(void);
 
+extern bool IsResGroupActivated(void);
+
+extern void ResManagerShmemInit(void);
 extern void InitResManager(void);
 
 #endif   /* RESOURCEMANAGER_H */

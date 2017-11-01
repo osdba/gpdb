@@ -30,6 +30,8 @@
 
 #include "gpopt/gpdbwrappers.h"
 
+#include "utils/ext_alloc.h"
+
 #define GP_WRAP_START	\
 	sigjmp_buf local_sigjmp_buf;	\
 	{	\
@@ -630,6 +632,21 @@ gpdb::CFuncDataAccess
 	{
 		/* catalog tables: pg_proc */
 		return func_data_access(funcid);
+	}
+	GP_WRAP_END;
+	return '\0';
+}
+
+char
+gpdb::CFuncExecLocation
+	(
+	Oid funcid
+	)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_proc */
+		return func_exec_location(funcid);
 	}
 	GP_WRAP_END;
 	return '\0';
@@ -2463,6 +2480,21 @@ gpdb::Pexttable
 	return NULL;
 }
 
+List *
+gpdb::PlExternalScanUriList
+	(
+	ExtTableEntry *ext,
+	bool *ismasteronlyp
+	)
+{
+	GP_WRAP_START;
+	{
+		return create_external_scan_uri_list(ext, ismasteronlyp);
+	}
+	GP_WRAP_END;
+	return NULL;
+}
+
 TargetEntry *
 gpdb::PteMember
 	(
@@ -3056,6 +3088,35 @@ gpdb::FMDCacheNeedsReset
 	GP_WRAP_END;
 
 	return true;
+}
+
+// Functions for ORCA's memory consumption to be tracked by GPDB
+void *
+gpdb::OptimizerAlloc
+		(
+			size_t size
+		)
+{
+	GP_WRAP_START;
+	{
+		return Ext_OptimizerAlloc(size);
+	}
+	GP_WRAP_END;
+
+	return NULL;
+}
+
+void
+gpdb::OptimizerFree
+		(
+			void *ptr
+		)
+{
+	GP_WRAP_START;
+	{
+		Ext_OptimizerFree(ptr);
+	}
+	GP_WRAP_END;
 }
 
 // EOF

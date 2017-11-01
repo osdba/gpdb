@@ -21,39 +21,40 @@
 #ifndef _PXFBRIDGE_H
 #define _PXFBRIDGE_H
 
+#include "pxfuriparser.h"
+#include "libchurl.h"
+
 #include "postgres.h"
 #include "cdb/cdbvars.h"
-#include "libchurl.h"
 #include "nodes/pg_list.h"
-#include "pxfuriparser.h"
 
 /*
  * Context for single query execution by PXF bridge
  */
 typedef struct
 {
-    CHURL_HEADERS   churl_headers;
-    CHURL_HANDLE    churl_handle;
-    GPHDUri*        gphd_uri;
-    StringInfoData  uri;
-    ListCell*       current_fragment;
-    StringInfoData  write_file_name;
-    Relation        relation;
+	CHURL_HEADERS churl_headers;
+	CHURL_HANDLE churl_handle;
+	GPHDUri    *gphd_uri;
+	StringInfoData uri;
+	ListCell   *current_fragment;
+	StringInfoData write_file_name;
+	Relation	relation;
 } gphadoop_context;
 
 /*
  * Clean up churl related data structures from the context
  */
-void gpbridge_cleanup(gphadoop_context *context);
+void		gpbridge_cleanup(gphadoop_context *context);
 
 /*
  * Sets up data before starting import
  */
-void gpbridge_import_start(gphadoop_context *context);
+void		gpbridge_import_start(gphadoop_context *context);
 
 /*
  * Reads data from PXF into the given buffer of a given size
  */
-int  gpbridge_read(gphadoop_context *context, char *databuf, int datalen);
+int			gpbridge_read(gphadoop_context *context, char *databuf, int datalen);
 
-#endif //_PXFBRIDGE_H
+#endif							/* _PXFBRIDGE_H */

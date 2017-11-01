@@ -43,10 +43,11 @@ static bool listOneExtensionContents(const char *extname, const char *oid);
 static bool isGPDB(void);
 static bool isGPDB4200OrLater(void);
 static bool isGPDB5000OrLater(void);
+static bool isGPDB6000OrLater(void);
 
 /* GPDB 3.2 used PG version 8.2.10, and we've moved the minor number up since then for each release,  4.1 = 8.2.15 */
 /* Allow for a couple of future releases.  If the version isn't in this range, we are talking to PostgreSQL, not GPDB */
-#define mightBeGPDB() (pset.sversion >= 80210 && pset.sversion < 80400)
+#define mightBeGPDB() (pset.sversion >= 80210 && pset.sversion < 90400)
 
 static bool isGPDB(void)
 {
@@ -148,6 +149,15 @@ static bool isGPDB5000OrLater(void)
 	return retValue;
 }
 
+static bool
+isGPDB6000OrLater(void)
+{
+	if (!isGPDB())
+		return false;		/* Not Greenplum at all. */
+
+	/* GPDB 6 is based on PostgreSQL 8.4 */
+	return pset.sversion >= 80400;
+}
 
 /*----------------
  * Handlers for various slash commands displaying some sort of list
@@ -380,7 +390,8 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 						  "  pg_catalog.pg_get_function_arguments(p.oid) as \"%s\",\n"
 						  " CASE\n"
 						  "  WHEN p.proisagg THEN '%s'\n"
-						  "  WHEN p.proiswin THEN '%s'\n"
+/* GPDB_84_MERGE_FIXME: This ought to be "proiswin" for GPDB 5, and we should use the above branch, with "proiswindow", for GPDB 6 and above */
+						  "  WHEN p.proiswindow THEN '%s'\n"
 						  "  WHEN p.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype THEN '%s'\n"
 						  "  ELSE '%s'\n"
 						  "END as \"%s\"",
@@ -470,6 +481,17 @@ describeFunctions(const char *functypes, const char *pattern, bool verbose, bool
 						  gettext_noop("reads sql data"),
 						  gettext_noop("modifies sql data"),
 						  gettext_noop("Data access"));
+		if (isGPDB6000OrLater())
+			appendPQExpBuffer(&buf,
+						  ",\n CASE\n"
+						  "  WHEN p.proexeclocation = 'a' THEN '%s'\n"
+						  "  WHEN p.proexeclocation = 'm' THEN '%s'\n"
+						  "  WHEN p.proexeclocation = 's' THEN '%s'\n"
+						  "END as \"%s\"",
+						  gettext_noop("any"),
+						  gettext_noop("master"),
+						  gettext_noop("all segments"),
+						  gettext_noop("Execute on"));
 		appendPQExpBuffer(&buf,
 						  ",\n CASE\n"
 						  "  WHEN p.provolatile = 'i' THEN '%s'\n"
@@ -773,12 +795,15 @@ listAllDbs(bool verbose)
 					  gettext_noop("Name"),
 					  gettext_noop("Owner"),
 					  gettext_noop("Encoding"));
+/* GPDB_84_MERGE_FIXME: datcollate and datctype have not been added yet */
+#if 0
 	if (pset.sversion >= 80400)
 		appendPQExpBuffer(&buf,
 						  "       d.datcollate as \"%s\",\n"
 						  "       d.datctype as \"%s\",\n",
 						  gettext_noop("Collation"),
 						  gettext_noop("Ctype"));
+#endif
 	appendPQExpBuffer(&buf, "       ");
 	printACLColumn(&buf, "d.datacl");
 	if (verbose && pset.sversion >= 80200)
@@ -857,6 +882,8 @@ permissionsList(const char *pattern)
 	appendPQExpBuffer(&buf, "c.relacl as \"Access privileges\"");  /* Old style, pre-8.3 */
 
 
+	// GPDB_84_MERGE_FIXME: We haven't merged the patch that added attacl yet.
+#if 0
 	if (pset.sversion >= 80400)
 		appendPQExpBuffer(&buf,
 						  ",\n  pg_catalog.array_to_string(ARRAY(\n"
@@ -865,7 +892,7 @@ permissionsList(const char *pattern)
 						  "    WHERE attrelid = c.oid AND NOT attisdropped AND attacl IS NOT NULL\n"
 						  "  ), E'\\n') AS \"%s\"",
 						  gettext_noop("Column access privileges"));
-
+#endif
 	appendPQExpBuffer(&buf, "\nFROM pg_catalog.pg_class c\n"
 	   "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
 					  "WHERE c.relkind IN ('r', 'v', 'S')\n");
@@ -1330,6 +1357,8 @@ describeOneTableDetails(const char *schemaname,
 						   : "''"),
 						  oid);
 	}
+	// GPDB_84_MERGE_FIXME: We haven't merged the patch that added relhastriggers yet.
+#if 0
 	else if (pset.sversion >= 80400)
 	{
 		printfPQExpBuffer(&buf,
@@ -1345,6 +1374,7 @@ describeOneTableDetails(const char *schemaname,
 						   : "''"),
 						  oid);
 	}
+#endif
 	else if (pset.sversion >= 80200)
 	{
 		printfPQExpBuffer(&buf,
@@ -3151,7 +3181,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 	bool		showIndexes = strchr(tabtypes, 'i') != NULL;
 	bool		showViews = strchr(tabtypes, 'v') != NULL;
 	bool		showSeq = strchr(tabtypes, 's') != NULL;
-	bool		showExternal = strchr(tabtypes, 'x') != NULL;
+	bool		showExternal = strchr(tabtypes, 'E') != NULL;
 
 	PQExpBufferData buf;
 	PGresult   *res;
@@ -4187,6 +4217,17 @@ listExtensionContents(const char *pattern)
 		fprintf(stderr, _("The server (version %d.%d) does not support extensions.\n"),
 				pset.sversion / 10000, (pset.sversion / 100) % 100);
 		return true;
+	}
+
+	/*
+	 * GPDB_91_MERGE_FIXME: We don't have the pg_desribe_object function,
+	 * needed for \dx+, in GPDB yet. We will get it when we merge with
+	 * PostgreSQL 9.1 (or if we decide to cherry-pick it earlier). Until
+	 * then, print the same as plain \dx does.
+	 */
+	if (pset.sversion < 90100)
+	{
+		return listExtensions(pattern);
 	}
 
 	initPQExpBuffer(&buf);

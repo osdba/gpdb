@@ -19,7 +19,7 @@
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- *	$PostgreSQL: pgsql/src/backend/parser/parse_utilcmd.c,v 2.20 2009/01/01 17:23:46 momjian Exp $
+ *	$PostgreSQL: pgsql/src/backend/parser/parse_utilcmd.c,v 2.11 2008/03/25 22:42:43 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -44,7 +44,6 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
-#include "optimizer/clauses.h"
 #include "parser/analyze.h"
 #include "parser/gramparse.h"
 #include "parser/parse_clause.h"
@@ -68,6 +67,7 @@
 #include "cdb/partitionselection.h"
 #include "cdb/cdbvars.h"
 
+
 /* State shared by transformCreateSchemaStmt and its subroutines */
 typedef struct
 {
@@ -82,19 +82,25 @@ typedef struct
 	List	   *grants;			/* GRANT items */
 } CreateSchemaStmtContext;
 
+
 static void transformColumnDefinition(ParseState *pstate,
 						  CreateStmtContext *cxt,
 						  ColumnDef *column);
 static void transformTableConstraint(ParseState *pstate,
 						 CreateStmtContext *cxt,
 						 Constraint *constraint);
-static IndexStmt *generateClonedIndexStmt(CreateStmtContext *cxt, Relation source_idx,
+static IndexStmt *generateClonedIndexStmt(CreateStmtContext *cxt,
+						Relation source_idx,
 						const AttrNumber *attmap, int attmap_length);
 static List *get_opclass(Oid opclass, Oid actual_datatype);
+static void transformIndexConstraints(ParseState *pstate,
+						  CreateStmtContext *cxt, bool mayDefer);
 static IndexStmt *transformIndexConstraint(Constraint *constraint,
 						 CreateStmtContext *cxt);
-static void transformFKConstraints(ParseState *pstate, CreateStmtContext *cxt,
-					   bool skipValidation, bool isAddConstraint);
+static void transformFKConstraints(ParseState *pstate,
+					   CreateStmtContext *cxt,
+					   bool skipValidation,
+					   bool isAddConstraint);
 static void transformConstraintAttrs(List *constraintList);
 static void transformColumnType(ParseState *pstate, ColumnDef *column);
 static void setSchemaName(char *context_schema, char **stmt_schema_name);
@@ -394,7 +400,8 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 
 	/* Check for SERIAL pseudo-types */
 	is_serial = false;
-	if (list_length(column->typeName->names) == 1)
+	if (list_length(column->typeName->names) == 1 &&
+		!column->typeName->pct_type)
 	{
 		char	   *typname = strVal(linitial(column->typeName->names));
 
@@ -412,6 +419,16 @@ transformColumnDefinition(ParseState *pstate, CreateStmtContext *cxt,
 			column->typeName->names = NIL;
 			column->typeName->typid = INT8OID;
 		}
+
+		/*
+		 * We have to reject "serial[]" explicitly, because once we've
+		 * set typeid, LookupTypeName won't notice arrayBounds.  We don't
+		 * need any special coding for serial(typmod) though.
+		 */
+		if (is_serial && column->typeName->arrayBounds != NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("array of serial is not implemented")));
 	}
 
 	/* Do necessary work on the column type declaration */
@@ -2085,7 +2102,7 @@ fillin_encoding(List *list)
  *		We also merge in any index definitions arising from
  *		LIKE ... INCLUDING INDEXES.
  */
-void
+static void
 transformIndexConstraints(ParseState *pstate, CreateStmtContext *cxt, bool mayDefer)
 {
 	IndexStmt  *index;
@@ -2796,7 +2813,7 @@ transformRuleStmt(RuleStmt *stmt, const char *queryString,
 				(errcode(ERRCODE_GROUPING_ERROR),
 		   errmsg("cannot use aggregate function in rule WHERE condition")));
 
-	if (pstate->p_hasWindFuncs)
+	if (pstate->p_hasWindowFuncs)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("cannot use window function in rule WHERE condition")));

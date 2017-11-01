@@ -99,7 +99,11 @@ typedef enum LWLockId
 	FirstLockMgrLock = FirstBufMappingLock + NUM_BUFFER_PARTITIONS,
 	SessionStateLock = FirstLockMgrLock + NUM_LOCK_PARTITIONS,
 	RelfilenodeGenLock,
-
+	FilespaceHashLock,
+	TablespaceHashLock,
+#ifdef USE_SEGWALREP
+	GpReplicationConfigFileLock,
+#endif
 	/* must be last except for MaxDynamicLWLock: */
 	NumFixedLWLocks,
 

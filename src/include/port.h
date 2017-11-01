@@ -6,7 +6,7 @@
  * Portions Copyright (c) 1996-2010, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/port.h,v 1.134 2010/05/15 14:44:13 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/port.h,v 1.119 2008/04/10 16:58:51 mha Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -468,5 +468,8 @@ extern int	pg_mkdir_p(char *path, int omode);
 
 /* port/quotes.c */
 extern char *escape_single_quotes_ascii(const char *src);
+
+/* port/wait_error.c */
+extern char *wait_result_to_str(int exit_status);
 
 #endif   /* PG_PORT_H */

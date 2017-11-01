@@ -217,7 +217,7 @@ CTranslatorScalarToDXL::PdxlnScOpFromExpr
 		{T_MinMaxExpr, &CTranslatorScalarToDXL::PdxlnScMinMaxFromExpr},
 		{T_FuncExpr, &CTranslatorScalarToDXL::PdxlnScFuncExprFromFuncExpr},
 		{T_Aggref, &CTranslatorScalarToDXL::PdxlnScAggrefFromAggref},
-		{T_WindowRef, &CTranslatorScalarToDXL::PdxlnScWindowref},
+		{T_WindowFunc, &CTranslatorScalarToDXL::PdxlnScWindowFunc},
 		{T_NullTest, &CTranslatorScalarToDXL::PdxlnScNullTestFromNullTest},
 		{T_NullIfExpr, &CTranslatorScalarToDXL::PdxlnScNullIfFromExpr},
 		{T_RelabelType, &CTranslatorScalarToDXL::PdxlnScCastFromRelabelType},
@@ -1340,6 +1340,12 @@ CTranslatorScalarToDXL::PdxlnScAggrefFromAggref
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLError, GPOS_WSZ_LIT("Aggregate functions with outer references"));
 	}
 
+	// ORCA doesn't support the FILTER clause yet.
+	if (paggref->aggfilter)
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("Aggregate functions with FILTER"));
+	}
+
 	IMDId *pmdidRetType = CScalarAggFunc::PmdidLookupReturnType(pmdidAgg, (EdxlaggstageNormal == edxlaggstage), m_pmda);
 	IMDId *pmdidResolvedRetType = NULL;
 	if (m_pmda->Pmdtype(pmdidRetType)->FAmbiguous())
@@ -1360,59 +1366,6 @@ CTranslatorScalarToDXL::PdxlnScAggrefFromAggref
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorScalarToDXL::Edxlfb
-//
-//	@doc:
-//		Return the DXL representation of window frame boundary
-//---------------------------------------------------------------------------
-EdxlFrameBoundary
-CTranslatorScalarToDXL::Edxlfb
-	(
-	WindowBoundingKind kind,
-	Node *pnode
-	)
-	const
-{
-	static ULONG rgrgulMapping[][2] =
-			{
-			{WINDOW_UNBOUND_PRECEDING, EdxlfbUnboundedPreceding},
-			{WINDOW_BOUND_PRECEDING, EdxlfbBoundedPreceding},
-			{WINDOW_CURRENT_ROW, EdxlfbCurrentRow},
-			{WINDOW_BOUND_FOLLOWING, EdxlfbBoundedFollowing},
-			{WINDOW_UNBOUND_FOLLOWING, EdxlfbUnboundedFollowing},
-			{WINDOW_DELAYED_BOUND_PRECEDING, EdxlfbDelayedBoundedPreceding},
-		    {WINDOW_DELAYED_BOUND_FOLLOWING, EdxlfbDelayedBoundedFollowing}
-			};
-
-	const ULONG ulArity = GPOS_ARRAY_SIZE(rgrgulMapping);
-	EdxlFrameBoundary edxlfb = EdxlfbSentinel;
-	for (ULONG ul = 0; ul < ulArity; ul++)
-	{
-		ULONG *pulElem = rgrgulMapping[ul];
-		if ((ULONG) kind == pulElem[0])
-		{
-			edxlfb = (EdxlFrameBoundary) pulElem[1];
-
-			if ((WINDOW_BOUND_FOLLOWING == kind) && ((NULL == pnode) || !IsA(pnode, Const)))
-			{
-				edxlfb = EdxlfbDelayedBoundedFollowing;
-			}
-
-			if ((WINDOW_BOUND_PRECEDING == kind) && ((NULL == pnode) || !IsA(pnode, Const)))
-			{
-				edxlfb = EdxlfbDelayedBoundedPreceding;
-			}
-
-			break;
-		}
-	}
-	GPOS_ASSERT(EdxlfbSentinel != edxlfb && "Invalid window frame boundary");
-
-	return edxlfb;
-}
-
-//---------------------------------------------------------------------------
-//	@function:
 //		CTranslatorScalarToDXL::Pdxlwf
 //
 //	@doc:
@@ -1421,58 +1374,67 @@ CTranslatorScalarToDXL::Edxlfb
 CDXLWindowFrame *
 CTranslatorScalarToDXL::Pdxlwf
 	(
-	const Expr *pexpr,
+	int frameOptions,
+	const Node *startOffset,
+	const Node *endOffset,
 	const CMappingVarColId* pmapvarcolid,
 	CDXLNode *pdxlnNewChildScPrL,
 	BOOL *pfHasDistributedTables // output
 	)
 {
-	GPOS_ASSERT(IsA(pexpr, WindowFrame));
-	const WindowFrame *pwindowframe = (WindowFrame *) pexpr;
+	EdxlFrameSpec edxlfs;
 
-	EdxlFrameSpec edxlfs = EdxlfsRow;
-	if (!pwindowframe->is_rows)
-	{
+	if ((frameOptions & FRAMEOPTION_ROWS) != 0)
+		edxlfs = EdxlfsRow;
+	else
 		edxlfs = EdxlfsRange;
-	}
 
-	EdxlFrameBoundary edxlfbLead = Edxlfb(pwindowframe->lead->kind, pwindowframe->lead->val);
-	EdxlFrameBoundary edxlfbTrail = Edxlfb(pwindowframe->trail->kind, pwindowframe->trail->val);
+	EdxlFrameBoundary edxlfbLead;
+	if ((frameOptions & FRAMEOPTION_END_UNBOUNDED_PRECEDING) != 0)
+		edxlfbLead = EdxlfbUnboundedPreceding;
+	else if ((frameOptions & FRAMEOPTION_END_VALUE_PRECEDING) != 0)
+		edxlfbLead = EdxlfbBoundedPreceding;
+	else if ((frameOptions & FRAMEOPTION_END_CURRENT_ROW) != 0)
+		edxlfbLead = EdxlfbCurrentRow;
+	else if ((frameOptions & FRAMEOPTION_END_VALUE_FOLLOWING) != 0)
+		edxlfbLead = EdxlfbBoundedFollowing;
+	else if ((frameOptions & FRAMEOPTION_END_UNBOUNDED_FOLLOWING) != 0)
+		edxlfbLead = EdxlfbUnboundedFollowing;
+	else
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiPlStmt2DXLConversion,
+			   GPOS_WSZ_LIT("Unrecognized window frame option"));
 
-	static ULONG rgrgulExclusionMapping[][2] =
-			{
-			{WINDOW_EXCLUSION_NULL, EdxlfesNulls},
-			{WINDOW_EXCLUSION_CUR_ROW, EdxlfesCurrentRow},
-			{WINDOW_EXCLUSION_GROUP, EdxlfesGroup},
-			{WINDOW_EXCLUSION_TIES, EdxlfesTies},
-			{WINDOW_EXCLUSION_NO_OTHERS, EdxlfesNone},
-			};
+	EdxlFrameBoundary edxlfbTrail;
+	if ((frameOptions & FRAMEOPTION_START_UNBOUNDED_PRECEDING) != 0)
+		edxlfbTrail = EdxlfbUnboundedPreceding;
+	else if ((frameOptions & FRAMEOPTION_START_VALUE_PRECEDING) != 0)
+		edxlfbTrail = EdxlfbBoundedPreceding;
+	else if ((frameOptions & FRAMEOPTION_START_CURRENT_ROW) != 0)
+		edxlfbTrail = EdxlfbCurrentRow;
+	else if ((frameOptions & FRAMEOPTION_START_VALUE_FOLLOWING) != 0)
+		edxlfbTrail = EdxlfbBoundedFollowing;
+	else if ((frameOptions & FRAMEOPTION_START_UNBOUNDED_FOLLOWING) != 0)
+		edxlfbTrail = EdxlfbUnboundedFollowing;
+	else
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiPlStmt2DXLConversion,
+			   GPOS_WSZ_LIT("Unrecognized window frame option"));
 
-	const ULONG ulArityExclusion = GPOS_ARRAY_SIZE(rgrgulExclusionMapping);
-	EdxlFrameExclusionStrategy edxlfes = EdxlfesSentinel;
-	for (ULONG ul = 0; ul < ulArityExclusion; ul++)
-	{
-		ULONG *pulElem = rgrgulExclusionMapping[ul];
-		if ((ULONG) pwindowframe->exclude == pulElem[0])
-		{
-			edxlfes = (EdxlFrameExclusionStrategy) pulElem[1];
-			break;
-		}
-	}
-	GPOS_ASSERT(EdxlfesSentinel != edxlfes && "Invalid window frame exclusion");
+	// We don't support non-default EXCLUDE [CURRENT ROW | GROUP | TIES |
+	// NO OTHERS] options.
+	EdxlFrameExclusionStrategy edxlfes = EdxlfesNulls;
 
 	CDXLNode *pdxlnLeadEdge = GPOS_NEW(m_pmp) CDXLNode(m_pmp, GPOS_NEW(m_pmp) CDXLScalarWindowFrameEdge(m_pmp, true /* fLeading */, edxlfbLead));
 	CDXLNode *pdxlnTrailEdge = GPOS_NEW(m_pmp) CDXLNode(m_pmp, GPOS_NEW(m_pmp) CDXLScalarWindowFrameEdge(m_pmp, false /* fLeading */, edxlfbTrail));
 
 	// translate the lead and trail value
-	if (NULL != pwindowframe->lead->val)
+	if (NULL != endOffset)
 	{
-		pdxlnLeadEdge->AddChild(PdxlnWindowFrameEdgeVal(pwindowframe->lead->val, pmapvarcolid, pdxlnNewChildScPrL, pfHasDistributedTables));
+		pdxlnLeadEdge->AddChild(PdxlnWindowFrameEdgeVal(endOffset, pmapvarcolid, pdxlnNewChildScPrL, pfHasDistributedTables));
 	}
 
-	if (NULL != pwindowframe->trail->val)
+	if (NULL != startOffset)
 	{
-		pdxlnTrailEdge->AddChild(PdxlnWindowFrameEdgeVal(pwindowframe->trail->val, pmapvarcolid, pdxlnNewChildScPrL, pfHasDistributedTables));
+		pdxlnTrailEdge->AddChild(PdxlnWindowFrameEdgeVal(startOffset, pmapvarcolid, pdxlnNewChildScPrL, pfHasDistributedTables));
 	}
 
 	CDXLWindowFrame *pdxlWf = GPOS_NEW(m_pmp) CDXLWindowFrame(m_pmp, edxlfs, edxlfes, pdxlnLeadEdge, pdxlnTrailEdge);
@@ -1534,22 +1496,22 @@ CTranslatorScalarToDXL::PdxlnWindowFrameEdgeVal
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorScalarToDXL::PdxlnScWindowref
+//		CTranslatorScalarToDXL::PdxlnScWindowFunc
 //
 //	@doc:
-//		Create a DXL node for a scalar window ref from a GPDB WindowRef
+//		Create a DXL node for a scalar window ref from a GPDB WindowFunc
 //
 //---------------------------------------------------------------------------
 CDXLNode *
-CTranslatorScalarToDXL::PdxlnScWindowref
+CTranslatorScalarToDXL::PdxlnScWindowFunc
 	(
 	const Expr *pexpr,
 	const CMappingVarColId* pmapvarcolid
 	)
 {
-	GPOS_ASSERT(IsA(pexpr, WindowRef));
+	GPOS_ASSERT(IsA(pexpr, WindowFunc));
 
-	const WindowRef *pwindowref = (WindowRef *) pexpr;
+	const WindowFunc *pwindowfunc = (WindowFunc *) pexpr;
 
 	static ULONG rgrgulMapping[][2] =
 		{
@@ -1558,37 +1520,47 @@ CTranslatorScalarToDXL::PdxlnScWindowref
 		{WINSTAGE_ROWKEY, EdxlwinstageRowKey},
 		};
 
+	// ORCA doesn't support the FILTER clause yet.
+	if (pwindowfunc->aggfilter)
+	{
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("Aggregate functions with FILTER"));
+	}
+
 	const ULONG ulArity = GPOS_ARRAY_SIZE(rgrgulMapping);
 	EdxlWinStage edxlwinstage = EdxlwinstageSentinel;
 
 	for (ULONG ul = 0; ul < ulArity; ul++)
 	{
 		ULONG *pulElem = rgrgulMapping[ul];
-		if ((ULONG) pwindowref->winstage == pulElem[0])
+		if ((ULONG) pwindowfunc->winstage == pulElem[0])
 		{
 			edxlwinstage = (EdxlWinStage) pulElem[1];
 			break;
 		}
 	}
 
-	ULONG ulWinSpecPos = (ULONG) pwindowref->winlevel;
+	ULONG ulWinSpecPos = (ULONG) 0;
 	if (m_fQuery)
 	{
-		ulWinSpecPos = (ULONG) pwindowref->winspec;
+		ulWinSpecPos = (ULONG) pwindowfunc->winref - 1;
 	}
 
 	GPOS_ASSERT(EdxlwinstageSentinel != edxlwinstage && "Invalid window stage");
-	if (0 != pwindowref->winlevelsup)
-	{
-		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("Window functions with outer references"));
-	}
 
+	/*
+	 * ORCA's ScalarWindowRef object doesn't have fields for the 'winstar'
+	 * and 'winagg', so we lose that information in the translation.
+	 * Fortunately, the executor currently doesn't need those fields to
+	 * be set correctly.
+	 */
 	CDXLScalarWindowRef *pdxlopWinref = GPOS_NEW(m_pmp) CDXLScalarWindowRef
 													(
 													m_pmp,
-													GPOS_NEW(m_pmp) CMDIdGPDB(pwindowref->winfnoid),
-													GPOS_NEW(m_pmp) CMDIdGPDB(pwindowref->restype),
-													pwindowref->windistinct,
+													GPOS_NEW(m_pmp) CMDIdGPDB(pwindowfunc->winfnoid),
+													GPOS_NEW(m_pmp) CMDIdGPDB(pwindowfunc->wintype),
+													pwindowfunc->windistinct,
+													pwindowfunc->winstar,
+													pwindowfunc->winagg,
 													edxlwinstage,
 													ulWinSpecPos
 													);
@@ -1596,7 +1568,7 @@ CTranslatorScalarToDXL::PdxlnScWindowref
 	// create the DXL node holding the scalar aggref
 	CDXLNode *pdxln = GPOS_NEW(m_pmp) CDXLNode(m_pmp, pdxlopWinref);
 
-	TranslateScalarChildren(pdxln, pwindowref->args, pmapvarcolid);
+	TranslateScalarChildren(pdxln, pwindowfunc->args, pmapvarcolid);
 
 	return pdxln;
 }

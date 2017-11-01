@@ -65,7 +65,7 @@ generate_greenplum_path_file:
 
 install: generate_greenplum_path_file
 	# Generate some python libraries
-	$(MAKE) -C bin all prefix=$(DESTDIR)$(prefix)
+	$(MAKE) -C bin $@ prefix=$(DESTDIR)$(prefix)
 
 	# Copy the management utilities
 	mkdir -p $(DESTDIR)$(prefix)/bin
@@ -132,6 +132,7 @@ install: generate_greenplum_path_file
 	rm -rf $(DESTDIR)$(prefix)/bin/src
 	rm -f $(DESTDIR)$(prefix)/bin/gpchecksubnetcfg
 	rm -rf $(DESTDIR)$(prefix)/bin/gppylib
+	rm -rf $(DESTDIR)$(prefix)/bin/gpload_test
 	find $(DESTDIR)$(prefix)/lib/python/gppylib -name test -type d | xargs rm -rf
 
 clean:

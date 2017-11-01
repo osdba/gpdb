@@ -4,12 +4,13 @@
  *	  routines supporting merge joins
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeMergejoin.c,v 1.90.2.1 2010/05/28 01:14:16 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeMergejoin.c,v 1.92 2008/08/14 18:47:58 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -748,7 +749,8 @@ ExecMergeJoin(MergeJoinState *node)
 						 * they are not eager free safe. However, when the merge join
 						 * is done, we can free the memory used by the child nodes.
 						 */
-						ExecEagerFreeMergeJoin(node);
+						if (!node->js.ps.delayEagerFree)
+							ExecEagerFreeMergeJoin(node);
 
 						/* Otherwise we're done. */
 						return NULL;
@@ -815,7 +817,8 @@ ExecMergeJoin(MergeJoinState *node)
 						 */
 						ExecSquelchNode(outerPlan);
 
-						ExecEagerFreeMergeJoin(node);
+						if (!node->js.ps.delayEagerFree)
+							ExecEagerFreeMergeJoin(node);
 
 						/* Otherwise we're done. */
 						return NULL;
@@ -856,7 +859,7 @@ ExecMergeJoin(MergeJoinState *node)
 				innerTupleSlot = node->mj_InnerTupleSlot;
 				econtext->ecxt_innertuple = innerTupleSlot;
 
-				if (node->js.jointype == JOIN_IN &&
+				if (node->js.jointype == JOIN_SEMI &&
 					node->mj_MatchedOuter)
 					qualResult = false;
 				else
@@ -872,7 +875,7 @@ ExecMergeJoin(MergeJoinState *node)
 					node->mj_MatchedInner = true;
 
 					/* In an antijoin, we never return a matched tuple */
-					if (node->js.jointype == JOIN_LASJ) 
+					if (node->js.jointype == JOIN_ANTI)
 					{
 						node->mj_JoinState = EXEC_MJ_NEXTOUTER;
 						break;
@@ -980,7 +983,8 @@ ExecMergeJoin(MergeJoinState *node)
 
 						if (((MergeJoin*)node->js.ps.plan)->unique_outer)
 						{
-							ExecEagerFreeMergeJoin(node);
+							if (!node->js.ps.delayEagerFree)
+								ExecEagerFreeMergeJoin(node);
 
 							/* we are done */
 							return NULL;
@@ -1202,7 +1206,8 @@ ExecMergeJoin(MergeJoinState *node)
 							 */
 							ExecSquelchNode(outerPlan);
 
-							ExecEagerFreeMergeJoin(node);
+							if (!node->js.ps.delayEagerFree)
+								ExecEagerFreeMergeJoin(node);
 
 							/* Otherwise we're done. */
 							return NULL;
@@ -1334,7 +1339,8 @@ ExecMergeJoin(MergeJoinState *node)
 						if (!TupIsNull(innerTupleSlot) && node->mj_squelchInner)
 							ExecSquelchNode(innerPlan);
 
-						ExecEagerFreeMergeJoin(node);
+						if (!node->js.ps.delayEagerFree)
+							ExecEagerFreeMergeJoin(node);
 
 						/* Otherwise we're done. */
 						return NULL;
@@ -1450,7 +1456,9 @@ ExecMergeJoin(MergeJoinState *node)
 				if (TupIsNull(innerTupleSlot))
 				{
 					MJ_printf("ExecMergeJoin: end of inner subplan\n");
-					ExecEagerFreeMergeJoin(node);
+
+					if (!node->js.ps.delayEagerFree)
+						ExecEagerFreeMergeJoin(node);
 
 					return NULL;
 				}
@@ -1503,7 +1511,8 @@ ExecMergeJoin(MergeJoinState *node)
 				{
 					MJ_printf("ExecMergeJoin: end of outer subplan\n");
 
-					ExecEagerFreeMergeJoin(node);
+					if (!node->js.ps.delayEagerFree)
+						ExecEagerFreeMergeJoin(node);
 
 					return NULL;
 				}
@@ -1544,6 +1553,7 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	mergestate = makeNode(MergeJoinState);
 	mergestate->js.ps.plan = (Plan *) node;
 	mergestate->js.ps.state = estate;
+	mergestate->js.ps.delayEagerFree = (eflags & EXEC_FLAG_REWIND) != 0;
 
 	/*
 	 * Miscellaneous initialization
@@ -1622,12 +1632,12 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	switch (node->join.jointype)
 	{
 		case JOIN_INNER:
-		case JOIN_IN:
+		case JOIN_SEMI:
 			mergestate->mj_FillOuter = false;
 			mergestate->mj_FillInner = false;
 			break;
 		case JOIN_LEFT:
-		case JOIN_LASJ:
+		case JOIN_ANTI:
 			mergestate->mj_FillOuter = true;
 			mergestate->mj_FillInner = false;
 			mergestate->mj_NullInnerTupleSlot =

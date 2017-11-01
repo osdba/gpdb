@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/analyze.c,v 1.114.2.4 2009/12/09 21:58:16 tgl Exp $
+ *      $PostgreSQL: pgsql/src/backend/commands/analyze.c,v 1.125 2008/08/25 22:42:32 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -33,7 +33,7 @@
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
-#include "parser/parse_expr.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "pgstat.h"
@@ -49,7 +49,7 @@
 #include "utils/pg_rusage.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
-#include "utils/tuplesort_mk.h"
+#include "utils/tqual.h"
 
 /*
  * To avoid consuming too much memory during analysis and/or too much space
@@ -94,7 +94,7 @@ typedef struct RowIndexes
 } RowIndexes;
 
 /* Default statistics target (GUC parameter) */
-int			default_statistics_target = 10;
+int			default_statistics_target = 100;
 
 /* A few variables that don't seem worth passing around as parameters */
 static int	elevel = -1;
@@ -234,9 +234,20 @@ analyze_rel_internal(Oid relid, VacuumStmt *vacstmt,
 	{
 		/* No need for a WARNING if we already complained during VACUUM */
 		if (!vacstmt->vacuum)
-			ereport(WARNING,
-					(errmsg("skipping \"%s\" --- only table or database owner can analyze it",
-							RelationGetRelationName(onerel))));
+		{
+			if (onerel->rd_rel->relisshared)
+				ereport(WARNING,
+						(errmsg("skipping \"%s\" --- only superuser can analyze it",
+								RelationGetRelationName(onerel))));
+			else if (onerel->rd_rel->relnamespace == PG_CATALOG_NAMESPACE)
+				ereport(WARNING,
+						(errmsg("skipping \"%s\" --- only superuser or database owner can analyze it",
+								RelationGetRelationName(onerel))));
+			else
+				ereport(WARNING,
+						(errmsg("skipping \"%s\" --- only table or database owner can analyze it",
+								RelationGetRelationName(onerel))));
+		}
 		relation_close(onerel, ShareUpdateExclusiveLock);
 		return;
 	}
@@ -482,7 +493,7 @@ analyze_rel_internal(Oid relid, VacuumStmt *vacstmt,
 			 * from the sample being sent for stats collection
 			 */
 			if (rowIndexes->toowide_cnt > 0)
-				{
+			{
 				int validRowsIdx = 0;
 				for (int rownum=0; rownum < numrows; rownum++)
 				{
@@ -501,10 +512,24 @@ analyze_rel_internal(Oid relid, VacuumStmt *vacstmt,
 			}
 
 			stats->tupDesc = onerel->rd_att;
-			(*stats->compute_stats) (stats,
-									 std_fetch_func,
-									 validRowsLength, // numbers of rows in sample excluding toowide if any.
-									 totalrows);
+
+			if (validRowsLength > 0)
+			{
+				(*stats->compute_stats) (stats,
+										 std_fetch_func,
+										 validRowsLength, // numbers of rows in sample excluding toowide if any.
+										 totalrows);
+			}
+			else
+			{
+				// All the rows were too wide to be included in the sample. We cannot
+				// do much in that case, but at least we know there were no NULLs, and
+				// that every item was >= WIDTH_THRESHOLD in width.
+				stats->stats_valid = true;
+				stats->stanullfrac = 0.0;
+				stats->stawidth = WIDTH_THRESHOLD;
+				stats->stadistinct = 0.0;		/* "unknown" */
+			}
 			stats->rows = rows; // Reset to original rows
 			MemoryContextResetAndDeleteChildren(col_context);
 		}
@@ -1054,21 +1079,6 @@ acquire_sample_rows(Relation onerel, HeapTuple *rows, int targrows,
 			ItemId		itemid;
 			HeapTupleData targtuple;
 			bool		sample_it = false;
-
-			itemid = PageGetItemId(targpage, targoffset);
-
-			/*
-			 * We ignore unused and redirect line pointers.  DEAD line
-			 * pointers should be counted as dead, because we need vacuum
-			 * to run to get rid of them.  Note that this rule agrees with
-			 * the way that heap_page_prune() counts things.
-			 */
-			if (!ItemIdIsNormal(itemid))
-			{
-				if (ItemIdIsDead(itemid))
-					deadrows += 1;
-				continue;
-			}
 
 			itemid = PageGetItemId(targpage, targoffset);
 
@@ -2094,10 +2104,10 @@ std_typanalyze(VacAttrStats *stats)
 		 * error in bin size f, and error probability gamma, the minimum
 		 * random sample size is
 		 *		r = 4 * k * ln(2*n/gamma) / f^2
-		 * Taking f = 0.5, gamma = 0.01, n = 1 million rows, we obtain
+		 * Taking f = 0.5, gamma = 0.01, n = 10^6 rows, we obtain
 		 *		r = 305.82 * k
 		 * Note that because of the log function, the dependence on n is
-		 * quite weak; even at n = 1 billion, a 300*k sample gives <= 0.59
+		 * quite weak; even at n = 10^12, a 300*k sample gives <= 0.66
 		 * bin size error with probability 0.99.  So there's no real need to
 		 * scale for n, which is a good thing because we don't necessarily
 		 * know it at this point.

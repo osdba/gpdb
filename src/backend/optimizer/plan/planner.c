@@ -4,12 +4,13 @@
  *	  The query optimizer external interface.
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/plan/planner.c,v 1.244 2008/10/04 21:56:53 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/plan/planner.c,v 1.245 2008/10/21 20:42:53 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -26,6 +27,7 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#include "optimizer/orca.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
@@ -40,11 +42,13 @@
 #endif
 #include "parser/parse_expr.h"
 #include "parser/parse_oper.h"
+#include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
 
+#include "catalog/pg_proc.h"
 #include "cdb/cdbllize.h"
 #include "cdb/cdbmutate.h"		/* apply_shareinput */
 #include "cdb/cdbpartition.h"
@@ -52,7 +56,6 @@
 #include "cdb/cdbpathtoplan.h"	/* cdbpathtoplan_create_flow() */
 #include "cdb/cdbgroup.h"		/* grouping_planner extensions */
 #include "cdb/cdbsetop.h"		/* motion utilities */
-#include "cdb/cdbsubselect.h"	/* cdbsubselect_flatten_sublinks() */
 #include "cdb/cdbvars.h"
 
 
@@ -69,9 +72,8 @@ planner_hook_type planner_hook = NULL;
 #define EXPRKIND_RTFUNC		2
 #define EXPRKIND_VALUES		3
 #define EXPRKIND_LIMIT		4
-#define EXPRKIND_ININFO		5
-#define EXPRKIND_APPINFO	6
-#define EXPRKIND_WINDOW_BOUND 7
+#define EXPRKIND_APPINFO	5
+#define EXPRKIND_WINDOW_BOUND 6
 
 
 static Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
@@ -87,11 +89,6 @@ static Oid *extract_grouping_ops(List *groupClause, int *numGroupOps);
 static List *make_subplanTargetList(PlannerInfo *root, List *tlist,
 					   AttrNumber **groupColIdx, Oid **groupOperators, bool *need_tlist_eval);
 static List *register_ordered_aggs(List *tlist, Node *havingqual, List *sub_tlist);
-
-// GP optimizer entry point
-#ifdef USE_ORCA
-extern PlannedStmt *PplstmtOptimize(Query *parse, bool *pfUnexpectedFailure);
-#endif
 
 typedef struct
 {
@@ -124,210 +121,8 @@ static void sort_canonical_gs_list(List *gs, int *p_nsets, Bitmapset ***p_sets);
 static Plan *pushdown_preliminary_limit(Plan *plan, Node *limitCount, int64 count_est, Node *limitOffset, int64 offset_est);
 static bool is_dummy_plan(Plan *plan);
 
+static bool isSimplyUpdatableQuery(Query *query);
 
-#ifdef USE_ORCA
-/**
- * Logging of optimization outcome
- */
-static void
-log_optimizer(PlannedStmt *plan, bool fUnexpectedFailure)
-{
-	if (!optimizer_log)
-	{
-		/* optimizer logging is not enabled */
-		return;
-	}
-
-	if (NULL != plan)
-	{
-		elog(DEBUG1, "Optimizer produced plan");
-		return;
-	}
-
-	if (optimizer_trace_fallback)
-		elog(INFO, "GPORCA failed to produce a plan, falling back to planner");
-
-	/* optimizer failed to produce a plan, log failure */
-	if (OPTIMIZER_ALL_FAIL == optimizer_log_failure)
-	{
-		elog(LOG, "Planner produced plan :%d", fUnexpectedFailure);
-		return;
-	}
-
-	if (fUnexpectedFailure && OPTIMIZER_UNEXPECTED_FAIL == optimizer_log_failure)
-	{
-		/* unexpected fall back */
-		elog(LOG, "Planner produced plan :%d", fUnexpectedFailure);
-		return;
-	}
-
-	if (!fUnexpectedFailure && OPTIMIZER_EXPECTED_FAIL == optimizer_log_failure)
-	{
-		/* expected fall back */
-		elog(LOG, "Planner produced plan :%d", fUnexpectedFailure);
-	}
-}
-#endif
-
-#ifdef USE_ORCA
-/*
- * optimize query using the new optimizer
- */
-static PlannedStmt *
-optimize_query(Query *parse, ParamListInfo boundParams)
-{
-	/* flag to check if optimizer unexpectedly failed to produce a plan */
-	bool		fUnexpectedFailure = false;
-	PlannerGlobal *glob;
-	Query	   *pqueryCopy;
-	PlannedStmt *result;
-	List	   *relationOids;
-	List	   *invalItems;
-	ListCell   *lc;
-	ListCell   *lp;
-
-	/*
-	 * Initialize a dummy PlannerGlobal struct. ORCA doesn't use it, but the
-	 * pre- and post-processing steps do.
-	 */
-	glob = makeNode(PlannerGlobal);
-	glob->paramlist = NIL;
-	glob->subrtables = NIL;
-	glob->rewindPlanIDs = NULL;
-	glob->transientPlan = false;
-	glob->share.producers = NULL;
-	glob->share.producer_count = 0;
-	glob->share.sliceMarks = NULL;
-	glob->share.motStack = NIL;
-	glob->share.qdShares = NIL;
-	glob->share.qdSlices = NIL;
-	glob->share.nextPlanId = 0;
-	/* these will be filled in below, in the pre- and post-processing steps */
-	glob->finalrtable = NIL;
-	glob->subplans = NIL;
-	glob->relationOids = NIL;
-	glob->invalItems = NIL;
-
-	/* create a local copy to hand to the optimizer */
-	pqueryCopy = (Query *) copyObject(parse);
-
-	/*
-	 * Pre-process the Query tree before calling optimizer. Currently, this
-	 * performs only constant folding.
-	 *
-	 * Constant folding will add dependencies to functions or relations in
-	 * glob->invalItems, for any functions that are inlined or eliminated
-	 * away. (We will find dependencies to other objects later, after planning).
-	 */
-	pqueryCopy = preprocess_query_optimizer(glob, pqueryCopy, boundParams);
-
-	/* Ok, invoke ORCA. */
-	result = PplstmtOptimize(pqueryCopy, &fUnexpectedFailure);
-
-	log_optimizer(result, fUnexpectedFailure);
-
-	/*
-	 * If ORCA didn't produce a plan, bail out and fall back to the Postgres
-	 * planner.
-	 */
-	if (!result)
-		return NULL;
-
-	/*
-	 * Post-process the plan.
-	 */
-
-	/*
-	 * ORCA filled in the final range table and subplans directly in the
-	 * PlannedStmt. We might need to modify them still, so copy them out to
-	 * the PlannerGlobal struct.
-	 */
-	glob->finalrtable = result->rtable;
-	glob->subplans = result->subplans;
-
-	/*
-	 * For optimizer, we already have share_id and the plan tree is already a
-	 * tree. However, the apply_shareinput_dag_to_tree walker does more than
-	 * DAG conversion. It will also populate column names for RTE_CTE entries
-	 * that will be later used for readable column names in EXPLAIN, if
-	 * needed.
-	 */
-	foreach(lp, glob->subplans)
-	{
-		Plan	   *subplan = (Plan *) lfirst(lp);
-
-		collect_shareinput_producers(glob, subplan, result->rtable);
-	}
-	collect_shareinput_producers(glob, result->planTree, result->rtable);
-
-	/* Post-process ShareInputScan nodes */
-	(void) apply_shareinput_xslice(result->planTree, glob);
-
-	/*
-	 * Fix ShareInputScans for EXPLAIN, like in standard_planner(). For all
-	 * subplans first, and then for the main plan tree.
-	 */
-	foreach(lp, glob->subplans)
-	{
-		Plan	   *subplan = (Plan *) lfirst(lp);
-
-		lfirst(lp) = replace_shareinput_targetlists(glob, subplan, result->rtable);
-	}
-	result->planTree = replace_shareinput_targetlists(glob, result->planTree, result->rtable);
-
-	/*
-	 * To save on memory, and on the network bandwidth when the plan is
-	 * dispatched to QEs, strip all subquery RTEs of the original Query
-	 * objects.
-	 */
-	remove_subquery_in_RTEs((Node *) glob->finalrtable);
-
-	/*
-	 * For plan cache invalidation purposes, extract the OIDs of all
-	 * relations in the final range table, and of all functions used in
-	 * expressions in the plan tree. (In the regular planner, this is done
-	 * in set_plan_references, see that for more comments.)
-	 */
-	foreach(lc, glob->finalrtable)
-	{
-		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
-
-		if (rte->rtekind == RTE_RELATION)
-			glob->relationOids = lappend_oid(glob->relationOids,
-											 rte->relid);
-	}
-	foreach(lp, glob->subplans)
-	{
-		Plan	   *subplan = (Plan *) lfirst(lp);
-
-		cdb_extract_plan_dependencies(glob, subplan);
-	}
-	cdb_extract_plan_dependencies(glob, result->planTree);
-
-	/*
-	 * Also extract dependencies from the original Query tree. This is needed
-	 * to capture dependencies to e.g. views, which have been expanded at
-	 * planning to the underlying tables, and don't appear anywhere in the
-	 * resulting plan.
-	 */
-	extract_query_dependencies(list_make1(pqueryCopy),
-							   &relationOids,
-							   &invalItems);
-	glob->relationOids = list_concat(glob->relationOids, relationOids);
-	glob->invalItems = list_concat(glob->invalItems, invalItems);
-
-	/*
-	 * All done! Copy the PlannerGlobal fields that we modified back to the
-	 * PlannedStmt before returning.
-	 */
-	result->rtable = glob->finalrtable;
-	result->subplans = glob->subplans;
-	result->relationOids = glob->relationOids;
-	result->invalItems = glob->invalItems;
-
-	return result;
-}
-#endif
 
 /*****************************************************************************
  *
@@ -345,27 +140,17 @@ optimize_query(Query *parse, ParamListInfo boundParams)
 PlannedStmt *
 planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 {
-	PlannedStmt *result = NULL;
+	PlannedStmt *result;
 	instr_time	starttime, endtime;
 
-	/**
-	 * If the new optimizer is enabled, try that first. If it does not return a plan,
-	 * then fall back to the planner.
-	 * TODO: caragg 11/08/2013: Enable ORCA when running in utility mode (MPP-21841)
-	 * TODO: caragg 02/05/2014: Enable ORCA when running on the segments (MPP-22515)
-	 */
-#ifdef USE_ORCA
-	if (optimizer
-		&& (GP_ROLE_UTILITY != Gp_role)
-		&& (MASTER_CONTENT_ID == GpIdentity.segindex))
+	if (planner_hook)
 	{
 		if (gp_log_optimization_time)
-		{
 			INSTR_TIME_SET_CURRENT(starttime);
-		}
-		START_MEMORY_ACCOUNT(MemoryAccounting_CreateAccount(0, MEMORY_OWNER_TYPE_Optimizer));
+
+		START_MEMORY_ACCOUNT(MemoryAccounting_CreateAccount(0, MEMORY_OWNER_TYPE_PlannerHook));
 		{
-			result = optimize_query(parse, boundParams);
+			result = (*planner_hook) (parse, cursorOptions, boundParams);
 		}
 		END_MEMORY_ACCOUNT();
 
@@ -373,37 +158,11 @@ planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		{
 			INSTR_TIME_SET_CURRENT(endtime);
 			INSTR_TIME_SUBTRACT(endtime, starttime);
-			elog(LOG, "Optimizer Time: %.3f ms", INSTR_TIME_GET_MILLISEC(endtime));
+			elog(LOG, "Planner Hook(s): %.3f ms", INSTR_TIME_GET_MILLISEC(endtime));
 		}
 	}
-#endif   /* USE_ORCA */
-
-	if (!result)
-	{
-		if (gp_log_optimization_time)
-		{
-			INSTR_TIME_SET_CURRENT(starttime);
-		}
-		START_MEMORY_ACCOUNT(MemoryAccounting_CreateAccount(0, MEMORY_OWNER_TYPE_Planner));
-		{
-			if (NULL != planner_hook)
-			{
-				result = (*planner_hook) (parse, cursorOptions, boundParams);
-			}
-			else
-			{
-				result = standard_planner(parse, cursorOptions, boundParams);
-			}
-
-			if (gp_log_optimization_time)
-			{
-				INSTR_TIME_SET_CURRENT(endtime);
-				INSTR_TIME_SUBTRACT(endtime, starttime);
-				elog(LOG, "Planner Time: %.3f ms", INSTR_TIME_GET_MILLISEC(endtime));
-			}
-		}
-		END_MEMORY_ACCOUNT();
-	}
+	else
+		result = standard_planner(parse, cursorOptions, boundParams);
 
 	return result;
 }
@@ -419,11 +178,59 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	ListCell   *lp,
 			   *lr;
 	PlannerConfig *config;
+	instr_time		starttime;
+	instr_time		endtime;
+
+	/*
+	 * If ORCA has been enabled, and we are in a state in which ORCA planning
+	 * is supported, then go ahead.
+	 */
+	if (optimizer &&
+		GP_ROLE_UTILITY != Gp_role && MASTER_CONTENT_ID == GpIdentity.segindex)
+	{
+		if (gp_log_optimization_time)
+			INSTR_TIME_SET_CURRENT(starttime);
+
+		START_MEMORY_ACCOUNT(MemoryAccounting_CreateAccount(0, MEMORY_OWNER_TYPE_Optimizer));
+		{
+			result = optimize_query(parse, boundParams);
+		}
+		END_MEMORY_ACCOUNT();
+
+		if (gp_log_optimization_time)
+		{
+			INSTR_TIME_SET_CURRENT(endtime);
+			INSTR_TIME_SUBTRACT(endtime, starttime);
+			elog(LOG, "Optimizer Time: %.3f ms", INSTR_TIME_GET_MILLISEC(endtime));
+		}
+
+		if (result)
+			return result;
+	}
+
+	/*
+	 * Fall back to using the PostgreSQL planner in case Orca didn't run (in
+	 * utility mode or on a segment) or if it didn't produce a plan.
+	 */
+	if (gp_log_optimization_time)
+		INSTR_TIME_SET_CURRENT(starttime);
+
+	/*
+	 * Incorrectly indented on purpose to avoid re-indenting an entire upstream
+	 * function
+	 */
+	START_MEMORY_ACCOUNT(MemoryAccounting_CreateAccount(0, MEMORY_OWNER_TYPE_Planner));
+	{
 
 	/* Cursor options may come from caller or from DECLARE CURSOR stmt */
 	if (parse->utilityStmt &&
 		IsA(parse->utilityStmt, DeclareCursorStmt))
+	{
 		cursorOptions |= ((DeclareCursorStmt *) parse->utilityStmt)->options;
+
+		/* Also try to make any cursor declared with DECLARE CURSOR updatable. */
+		cursorOptions |= CURSOR_OPT_UPDATABLE;
+	}
 
 	/*
 	 * Set up global state for this planner invocation.  This data is needed
@@ -441,7 +248,9 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	glob->finalrtable = NIL;
 	glob->relationOids = NIL;
 	glob->invalItems = NIL;
+	glob->lastPHId = 0;
 	glob->transientPlan = false;
+	glob->oneoffPlan = false;
 	/* ApplyShareInputContext initialization. */
 	glob->share.producers = NULL;
 	glob->share.producer_count = 0;
@@ -450,6 +259,11 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	glob->share.qdShares = NIL;
 	glob->share.qdSlices = NIL;
 	glob->share.nextPlanId = 0;
+
+	if ((cursorOptions & CURSOR_OPT_UPDATABLE) != 0)
+		glob->simplyUpdatable = isSimplyUpdatableQuery(parse);
+	else
+		glob->simplyUpdatable = false;
 
 	/* Determine what fraction of the plan is likely to be scanned */
 	if (cursorOptions & CURSOR_OPT_FAST_PLAN)
@@ -592,6 +406,7 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	result->commandType = parse->commandType;
 	result->canSetTag = parse->canSetTag;
 	result->transientPlan = glob->transientPlan;
+	result->oneoffPlan = glob->oneoffPlan;
 	result->planTree = top_plan;
 	result->rtable = glob->finalrtable;
 	result->resultRelations = root->resultRelations;
@@ -612,6 +427,8 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	result->queryPartOids = NIL;
 	result->queryPartsMetadata = NIL;
 	result->numSelectorsPerScanId = NIL;
+
+	result->simplyUpdatable = glob->simplyUpdatable;
 
 	{
 		ListCell *lc;
@@ -636,6 +453,16 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		 */
 		assign_plannode_id(result);
 	}
+
+	if (gp_log_optimization_time)
+	{
+		INSTR_TIME_SET_CURRENT(endtime);
+		INSTR_TIME_SUBTRACT(endtime, starttime);
+		elog(LOG, "Planner Time: %.3f ms", INSTR_TIME_GET_MILLISEC(endtime));
+	}
+
+	}
+	END_MEMORY_ACCOUNT();
 
 	return result;
 }
@@ -680,6 +507,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	PlannerInfo *root;
 	Plan	   *plan;
 	List	   *newHaving;
+	bool		hasOuterJoins;
 	ListCell   *l;
 
 	/* Create a PlannerInfo data structure for this subquery */
@@ -700,7 +528,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		root->list_cteplaninfo = init_list_cteplaninfo(list_length(parse->cteList));
 	}
 
-	root->in_info_list = NIL;
 	root->append_rel_list = NIL;
 
 	Assert(config);
@@ -740,37 +567,39 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	AssertImply(parse->jointree->fromlist, list_length(parse->jointree->fromlist) == 1);
 
 	/* CDB: Stash current query level's relids before pulling up subqueries. */
-	root->currlevel_relids = get_relids_in_jointree((Node *) parse->jointree);
+	root->currlevel_relids = get_relids_in_jointree((Node *) parse->jointree, false);
 
 	/*
-	 * Look for IN clauses at the top level of WHERE, and transform them into
-	 * joins.  Note that this step only handles IN clauses originally at top
-	 * level of WHERE; if we pull up any subqueries in the next step, their
-	 * INs are processed just before pulling them up.
+	 * Look for ANY and EXISTS SubLinks in WHERE and JOIN/ON clauses, and try
+	 * to transform them into joins. Note that this step does not descend
+	 * into subqueries; if we pull up any subqueries below, their SubLinks are
+	 * processed just before pulling them up.
 	 */
 	if (parse->hasSubLinks)
-		cdbsubselect_flatten_sublinks(root, (Node *) parse);
+		pull_up_sublinks(root);
+
+	/*
+	 * Scan the rangetable for set-returning functions, and inline them
+	 * if possible (producing subqueries that might get pulled up next).
+	 * Recursion issues here are handled in the same way as for IN clauses.
+	 */
+	inline_set_returning_functions(root);
 
 	/*
 	 * Check to see if any subqueries in the rangetable can be merged into
 	 * this query.
 	 */
 	parse->jointree = (FromExpr *)
-		pull_up_subqueries(root, (Node *) parse->jointree, false, false);
+		pull_up_subqueries(root, (Node *) parse->jointree, NULL, NULL);
 
 	/*
 	 * Detect whether any rangetable entries are RTE_JOIN kind; if not, we can
 	 * avoid the expense of doing flatten_join_alias_vars().  Also check for
-	 * outer joins --- if none, we can skip reduce_outer_joins() and some
-	 * other processing.  This must be done after we have done
-	 * pull_up_subqueries, of course.
-	 *
-	 * Note: if reduce_outer_joins manages to eliminate all outer joins,
-	 * root->hasOuterJoins is not reset currently.	This is OK since its
-	 * purpose is merely to suppress unnecessary processing in simple cases.
+	 * outer joins --- if none, we can skip reduce_outer_joins().
+	 * This must be done after we have done pull_up_subqueries, of course.
 	 */
 	root->hasJoinRTEs = false;
-	root->hasOuterJoins = false;
+	hasOuterJoins = false;
 	foreach(l, parse->rtable)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
@@ -780,7 +609,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 			root->hasJoinRTEs = true;
 			if (IS_OUTER_JOIN(rte->jointype))
 			{
-				root->hasOuterJoins = true;
+				hasOuterJoins = true;
 				/* Can quit scanning once we find an outer join */
 				break;
 			}
@@ -842,17 +671,13 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 */
 	foreach(l, parse->windowClause)
 	{
-		WindowSpec *w = (WindowSpec *) lfirst(l);
+		WindowClause *wc = (WindowClause *) lfirst(l);
 
-		if (w != NULL && w->frame != NULL)
-		{
-			WindowFrame *f = w->frame;
-
-			if (f->trail != NULL)
-				f->trail->val = preprocess_expression(root, f->trail->val, EXPRKIND_WINDOW_BOUND);
-			if (f->lead != NULL)
-				f->lead->val = preprocess_expression(root, f->lead->val, EXPRKIND_WINDOW_BOUND);
-		}
+		/* partitionClause/orderClause are sort/group expressions */
+		wc->startOffset = preprocess_expression(root, wc->startOffset,
+												EXPRKIND_WINDOW_BOUND);
+		wc->endOffset = preprocess_expression(root, wc->endOffset,
+											  EXPRKIND_WINDOW_BOUND);
 	}
 
 	parse->limitOffset = preprocess_expression(root, parse->limitOffset,
@@ -860,9 +685,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	parse->limitCount = preprocess_expression(root, parse->limitCount,
 											  EXPRKIND_LIMIT);
 
-	root->in_info_list = (List *)
-		preprocess_expression(root, (Node *) root->in_info_list,
-							  EXPRKIND_ININFO);
 	root->append_rel_list = (List *)
 		preprocess_expression(root, (Node *) root->append_rel_list,
 							  EXPRKIND_APPINFO);
@@ -941,7 +763,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * This step is most easily done after we've done expression
 	 * preprocessing.
 	 */
-	if (root->hasOuterJoins)
+	if (hasOuterJoins)
 		reduce_outer_joins(root);
 
 	/*
@@ -953,37 +775,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		plan = inheritance_planner(root);
 	else
 		plan = grouping_planner(root, tuple_fraction);
-
-	/*
-	 * Deal with explicit redistribution requirements for TableValueExpr
-	 * subplans with explicit distribitution
-	 */
-	if (parse->scatterClause)
-	{
-		bool		r;
-		List	   *exprList;
-
-
-		/* Deal with the special case of SCATTER RANDOMLY */
-		if (list_length(parse->scatterClause) == 1 && linitial(parse->scatterClause) == NULL)
-			exprList = NIL;
-		else
-			exprList = parse->scatterClause;
-
-		/*
-		 * Repartition the subquery plan based on our distribution
-		 * requirements
-		 */
-		r = repartitionPlan(plan, false, false, exprList);
-		if (!r)
-		{
-			/*
-			 * This should not be possible, repartitionPlan should never fail
-			 * when both stable and rescannable are false.
-			 */
-			elog(ERROR, "failure repartitioning plan");
-		}
-	}
 
 	/*
 	 * If any subplans were generated, or if we're inside a subplan, build
@@ -1030,6 +821,35 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 */
 	if (root->hasJoinRTEs && kind != EXPRKIND_VALUES)
 		expr = flatten_join_alias_vars(root, expr);
+
+	if (root->parse->hasFuncsWithExecRestrictions)
+	{
+		if (kind == EXPRKIND_RTFUNC)
+		{
+			/* allowed */
+		}
+		else if (kind == EXPRKIND_TARGET)
+		{
+			/*
+			 * Allowed in simple cases with no range table. For example,
+			 * "SELECT func()" is allowed, but "SELECT func() FROM foo" is not.
+			 */
+			if (root->parse->rtable &&
+				check_execute_on_functions((Node *) root->parse->targetList) != PROEXECLOCATION_ANY)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("function with EXECUTE ON restrictions cannot be used in the SELECT list of a query with FROM")));
+			}
+		}
+		else
+		{
+			if (check_execute_on_functions((Node *) root->parse->targetList) != PROEXECLOCATION_ANY)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("function with EXECUTE ON restrictions cannot be used here")));
+		}
+	}
 
 	/*
 	 * Simplify constant expressions.
@@ -1112,13 +932,9 @@ preprocess_qual_conditions(PlannerInfo *root, Node *jtnode)
 	else if (IsA(jtnode, JoinExpr))
 	{
 		JoinExpr   *j = (JoinExpr *) jtnode;
-		ListCell   *l;
 
 		preprocess_qual_conditions(root, j->larg);
 		preprocess_qual_conditions(root, j->rarg);
-
-		foreach(l, j->subqfromlist)
-			preprocess_qual_conditions(root, lfirst(l));
 
 		j->quals = preprocess_expression(root, j->quals, EXPRKIND_QUAL);
 	}
@@ -1171,9 +987,7 @@ inheritance_planner(PlannerInfo *root)
 			continue;
 
 		/*
-		 * Generate modified query with this rel as target.  We have to be
-		 * prepared to translate varnos in in_info_list as well as in the
-		 * Query proper.
+		 * Generate modified query with this rel as target.
 		 */
 		memcpy(&subroot, root, sizeof(PlannerInfo));
 		subroot.parse = (Query *)
@@ -1181,12 +995,11 @@ inheritance_planner(PlannerInfo *root)
 								   appinfo);
 		subroot.returningLists = NIL;
 		subroot.init_plans = NIL;
-		subroot.in_info_list = (List *)
-			adjust_appendrel_attrs(&subroot, (Node *) root->in_info_list,
-								   appinfo);
-		subroot.init_plans = NIL;
+		/* We needn't modify the child's append_rel_list */
 		/* There shouldn't be any OJ info to translate, as yet */
-		Assert(subroot.oj_info_list == NIL);
+		Assert(subroot.join_info_list == NIL);
+		/* and we haven't created PlaceHolderInfos, either */
+		Assert(subroot.placeholder_list == NIL);
 
 		/* Generate plan */
 		subplan = grouping_planner(&subroot, 0.0 /* retrieve all tuples */ );
@@ -1541,7 +1354,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 													  true);
 	}
 	else if ( parse->windowClause && parse->targetList &&
-			  contain_windowref((Node *)parse->targetList, NULL) )
+			  contain_window_function((Node *) parse->targetList) )
 	{
 		if (extract_nodes(NULL, (Node *) tlist, T_PercentileExpr) != NIL)
 		{
@@ -1566,7 +1379,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		 */
 		sort_pathkeys = make_pathkeys_for_sortclauses(root, parse->sortClause,
 											  result_plan->targetlist, true);
-		sort_pathkeys = canonicalize_pathkeys(root, sort_pathkeys);
 	}
 	else
 	{
@@ -1795,15 +1607,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 				}
 			}
 
-			if (result_plan != NULL && result_plan->flow->numSortCols == 0)
-			{
-				/*
-				 * cdb_grouping_planner generated the full plan, with the the
-				 * right tlist.  And it has no sort order
-				 */
-				current_pathkeys = NIL;
-			}
-
 			if (result_plan != NULL && querynode_changed)
 			{
 				/*
@@ -1814,7 +1617,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 				 */
 				sort_pathkeys = make_pathkeys_for_sortclauses(root, parse->sortClause,
 											  result_plan->targetlist, true);
-				sort_pathkeys = canonicalize_pathkeys(root, sort_pathkeys);
 			}
 		}
 		else	/* Not GP_ROLE_DISPATCH */
@@ -1947,9 +1749,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					canonical_grpsets->grpset_counts != NULL &&
 					canonical_grpsets->grpset_counts[0] > 1)
 				{
-					result_plan->flow = pull_up_Flow(result_plan,
-													 result_plan->lefttree,
-												  (current_pathkeys != NIL));
+					result_plan->flow = pull_up_Flow(result_plan, result_plan->lefttree);
 					result_plan = add_repeat_node(result_plan,
 										 canonical_grpsets->grpset_counts[0],
 												  0);
@@ -2016,9 +1816,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					canonical_grpsets->grpset_counts != NULL &&
 					canonical_grpsets->grpset_counts[0] > 1)
 				{
-					result_plan->flow = pull_up_Flow(result_plan,
-													 result_plan->lefttree,
-												  (current_pathkeys != NIL));
+					result_plan->flow = pull_up_Flow(result_plan, result_plan->lefttree);
 					result_plan = add_repeat_node(result_plan,
 										 canonical_grpsets->grpset_counts[0],
 												  0);
@@ -2075,7 +1873,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					 */
 					sort_pathkeys = make_pathkeys_for_sortclauses(root, parse->sortClause,
 											  result_plan->targetlist, true);
-					sort_pathkeys = canonicalize_pathkeys(root, sort_pathkeys);
 					CdbPathLocus_MakeNull(&current_locus);
 				}
 			}
@@ -2114,9 +1911,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 	 * which we can obtain the distribution info.)
 	 */
 	if (!result_plan->flow)
-		result_plan->flow = pull_up_Flow(result_plan,
-										 getAnySubplan(result_plan),
-										 (current_pathkeys != NIL));
+		result_plan->flow = pull_up_Flow(result_plan, getAnySubplan(result_plan));
 
 	/*
 	 * MPP: If there's a DISTINCT clause and we're not collocated on the
@@ -2183,9 +1978,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 
 					result_plan = (Plan *) make_unique(result_plan, parse->distinctClause);
 
-					result_plan->flow = pull_up_Flow(result_plan,
-													 result_plan->lefttree,
-													 true);
+					result_plan->flow = pull_up_Flow(result_plan, result_plan->lefttree);
 
 					result_plan->plan_rows = numDistinct;
 
@@ -2245,10 +2038,37 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		}
 
 		/*
-		 * Update numOrderbyCols to length of sort_pathkeys. For cdb: decide
-		 * which sort attribute should be preserved by merge gather motion
+		 * An ORDER BY doesn't make much sense, unless we bring all the data
+		 * to a single node. Otherwise it's just a partial order. (If there's
+		 * a LIMIT or OFFSET clause, we'll take care of this below, after
+		 * inserting the Limit node).
+		 *
+		 * In a subquery, though, a partial order is OK. In fact, we could
+		 * probably not bother with the sort at all, unless there's a LIMIT
+		 * or OFFSET, because it's not going to make any difference to the
+		 * overall query's result. For example, in "WHERE x IN (SELECT ...
+		 * ORDER BY foo)", the ORDER BY in the subquery will make no
+		 * difference. PostgreSQL honors the sort, though, and historically,
+		 * GPDB has also done a partial sort, separately on each node. So
+		 * keep that behavior for now.
+		 *
+		 * A SELECT INTO or CREATE TABLE AS is similar to a subquery: the
+		 * order doesn't really matter, but let's keep the partial order
+		 * anyway.
+		 *
+		 * In a TABLE function's input subquery, a partial order is the
+		 * documented behavior, so in that case that's definitely what we
+		 * want.
 		 */
-		result_plan->flow->numOrderbyCols = list_length(sort_pathkeys);
+		if (result_plan->flow->flotype != FLOW_SINGLETON &&
+			(root->config->honor_order_by || !root->parent_root) &&
+			!parse->intoClause &&
+			!parse->isTableValueSelect &&
+			!parse->limitCount && !parse->limitOffset)
+		{
+			result_plan = (Plan *) make_motion_gather(root, result_plan, -1,
+													  sort_pathkeys);
+		}
 	}
 
 	/*
@@ -2259,9 +2079,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		if (IsA(result_plan, Sort) &&gp_enable_sort_distinct)
 			((Sort *) result_plan)->noduplicates = true;
 		result_plan = (Plan *) make_unique(result_plan, parse->distinctClause);
-		result_plan->flow = pull_up_Flow(result_plan,
-										 result_plan->lefttree,
-										 true);
+		result_plan->flow = pull_up_Flow(result_plan, result_plan->lefttree);
 
 		/*
 		 * If there was grouping or aggregation, leave plan_rows as-is (ie,
@@ -2282,8 +2100,24 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			/* pushdown the first phase of multi-phase limit (which takes offset into account) */
 			result_plan = pushdown_preliminary_limit(result_plan, parse->limitCount, count_est, parse->limitOffset, offset_est);
 			
-			/* Focus on QE [merge to preserve order], prior to final LIMIT. */
-			result_plan = (Plan *) make_motion_gather_to_QE(result_plan, current_pathkeys != NIL);
+			/*
+			 * Focus on QE [merge to preserve order], prior to final LIMIT.
+			 *
+			 * If there is an ORDER BY, the input should be in the required
+			 * order now, and we must preserve the order in the merge. But if
+			 * there is no ORDER BY, don't try to maintain the current input
+			 * order. In that case, current_pathkeys might contain unneeded
+			 * columns that have been eliminated from the final target list,
+			 * and we cannot maintain such an order in the Motion anymore.
+			 */
+			if (parse->sortClause)
+			{
+				if (!pathkeys_contained_in(sort_pathkeys, current_pathkeys))
+					elog(ERROR, "invalid result order generated for ORDER BY + LIMIT");
+				result_plan = (Plan *) make_motion_gather_to_QE(root, result_plan, sort_pathkeys);
+			}
+			else
+				result_plan = (Plan *) make_motion_gather_to_QE(root, result_plan, NIL);
 			result_plan->total_cost += motion_cost_per_row * result_plan->plan_rows;
 		}
 			
@@ -2302,9 +2136,37 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 										  parse->limitCount,
 										  offset_est,
 										  count_est);
-		result_plan->flow = pull_up_Flow(result_plan,
-										 result_plan->lefttree,
-										 true);
+		result_plan->flow = pull_up_Flow(result_plan, result_plan->lefttree);
+	}
+
+	/*
+	 * Deal with explicit redistribution requirements for TableValueExpr
+	 * subplans with explicit distribitution
+	 */
+	if (parse->scatterClause)
+	{
+		bool		r;
+		List	   *exprList;
+
+		/* Deal with the special case of SCATTER RANDOMLY */
+		if (list_length(parse->scatterClause) == 1 && linitial(parse->scatterClause) == NULL)
+			exprList = NIL;
+		else
+			exprList = parse->scatterClause;
+
+		/*
+		 * Repartition the subquery plan based on our distribution
+		 * requirements
+		 */
+		r = repartitionPlan(result_plan, false, false, exprList);
+		if (!r)
+		{
+			/*
+			 * This should not be possible, repartitionPlan should never fail
+			 * when both stable and rescannable are false.
+			 */
+			elog(ERROR, "failure repartitioning plan");
+		}
 	}
 
 	Insist(result_plan->flow);
@@ -2438,9 +2300,9 @@ is_dummy_plan_walker(Node *node, bool *context)
 							&& is_dummy_plan(outerPlan(node));
 						break;
 
-					case JOIN_IN:
+					case JOIN_SEMI:
 					case JOIN_LASJ_NOTIN:
-					case JOIN_LASJ:		/* outer */
+					case JOIN_ANTI:		/* outer */
 						*context = is_dummy_plan(outerPlan(node));
 						break;
 
@@ -3006,7 +2868,7 @@ make_subplanTargetList(PlannerInfo *root,
 	 * Vars; they will be replaced by Params later on).
 	 */
 	sub_tlist = flatten_tlist(tlist);
-	extravars = pull_var_clause(parse->havingQual, false);
+	extravars = pull_var_clause(parse->havingQual, true);
 	sub_tlist = add_to_flat_tlist(sub_tlist, extravars, false /* resjunk */);
 	list_free(extravars);
 
@@ -3849,10 +3711,44 @@ pushdown_preliminary_limit(Plan *plan, Node *limitCount, int64 count_est, Node *
 										  0,
 										  precount_est);
 
-		result_plan->flow = pull_up_Flow(result_plan,
-										 result_plan->lefttree,
-										 true);
+		result_plan->flow = pull_up_Flow(result_plan, result_plan->lefttree);
 	}
 
 	return result_plan;
+}
+
+
+/*
+ * isSimplyUpdatableQuery -
+ *  determine whether a query is a simply updatable scan of a relation
+ *
+ * A query is simply updatable if, and only if, it...
+ * - has no window clauses
+ * - has no sort clauses
+ * - has no grouping, having, distinct clauses, or simple aggregates
+ * - has no subqueries
+ * - has no LIMIT/OFFSET
+ * - references only one range table (i.e. no joins, self-joins)
+ *   - this range table must itself be updatable
+ */
+static bool
+isSimplyUpdatableQuery(Query *query)
+{
+	if (query->commandType == CMD_SELECT &&
+		query->windowClause == NIL &&
+		query->sortClause == NIL &&
+		query->groupClause == NIL &&
+		query->havingQual == NULL &&
+		query->distinctClause == NIL &&
+		!query->hasAggs &&
+		!query->hasSubLinks &&
+		query->limitCount == NULL &&
+		query->limitOffset == NULL &&
+		list_length(query->rtable) == 1)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) linitial(query->rtable);
+		if (isSimplyUpdatableRelation(rte->relid, true))
+			return true;
+	}
+	return false;
 }

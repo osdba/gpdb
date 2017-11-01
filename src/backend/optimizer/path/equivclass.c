@@ -10,13 +10,14 @@
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/path/equivclass.c,v 1.9.2.3 2009/09/29 01:21:02 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/path/equivclass.c,v 1.13 2008/10/21 20:42:52 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/skey.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/paths.h"
@@ -468,7 +469,7 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 		if (newec->ec_has_volatile ||
 			expression_returns_set((Node *) expr) ||
 			contain_agg_clause((Node *) expr) ||
-			contain_window_functions((Node *) expr))
+			contain_window_function((Node *) expr))
 		{
 			newec->ec_has_const = false;
 			newem->em_is_const = false;
@@ -720,7 +721,7 @@ generate_base_implied_equalities_no_const(PlannerInfo *root,
 	foreach(lc, ec->ec_members)
 	{
 		EquivalenceMember *cur_em = (EquivalenceMember *) lfirst(lc);
-		List	   *vars = pull_var_clause((Node *) cur_em->em_expr, false);
+		List	   *vars = pull_var_clause((Node *) cur_em->em_expr, true);
 
 		add_vars_to_targetlist(root, vars, ec->ec_relids);
 		list_free(vars);

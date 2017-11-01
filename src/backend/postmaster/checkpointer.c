@@ -41,6 +41,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
+#include "replication/syncrep.h"
 #include "storage/fd.h"
 #include "storage/freespace.h"
 #include "storage/ipc.h"
@@ -153,12 +154,12 @@ static volatile sig_atomic_t shutdown_requested = false;
 static bool ckpt_active = false;
 
 /* these values are valid when ckpt_active is true: */
-static time_t ckpt_start_time;
+static pg_time_t ckpt_start_time;
 static XLogRecPtr ckpt_start_recptr;
 static double ckpt_cached_elapsed;
 
-static time_t last_checkpoint_time;
-static time_t last_xlog_switch_time;
+static pg_time_t last_checkpoint_time;
+static pg_time_t last_xlog_switch_time;
 
 /* Prototypes for private functions */
 
@@ -344,6 +345,9 @@ CheckpointerMain(void)
 	 */
 	PG_SETMASK(&UnBlockSig);
 
+	/* update global shmem state for sync rep */
+	SyncRepUpdateSyncStandbysDefined();
+
 	/*
 	 * Loop forever
 	 */
@@ -351,7 +355,7 @@ CheckpointerMain(void)
 	{
 		bool		do_checkpoint = false;
 		int			flags = 0;
-		time_t		now;
+		pg_time_t	now;
 		int			elapsed_secs;
 
 		/*
@@ -370,6 +374,9 @@ CheckpointerMain(void)
 		{
 			got_SIGHUP = false;
 			ProcessConfigFile(PGC_SIGHUP);
+
+			/* update global shmem state for sync rep */
+			SyncRepUpdateSyncStandbysDefined();
 		}
 		if (checkpoint_requested)
 		{
@@ -396,7 +403,7 @@ CheckpointerMain(void)
 		 * occurs without an external request, but we set the CAUSE_TIME flag
 		 * bit even if there is also an external request.
 		 */
-		now = time(NULL);
+		now = (pg_time_t) time(NULL);
 		elapsed_secs = now - last_checkpoint_time;
 		if (elapsed_secs >= CheckPointTimeout)
 		{
@@ -501,13 +508,13 @@ CheckpointerMain(void)
 static void
 CheckArchiveTimeout(void)
 {
-	time_t		now;
-	time_t		last_time;
+	pg_time_t	now;
+	pg_time_t	last_time;
 
 	if (XLogArchiveTimeout <= 0)
 		return;
 
-	now = time(NULL);
+	now = (pg_time_t) time(NULL);
 
 	/* First we do a quick check using possibly-stale local state. */
 	if ((int) (now - last_xlog_switch_time) < XLogArchiveTimeout)

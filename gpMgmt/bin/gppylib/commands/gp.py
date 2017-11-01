@@ -54,17 +54,6 @@ def getPostmasterPID(hostname, datadir):
     except:
         return -1
 
-def get_max_dbid(name,conn):
-    try:
-        curs=conn.cursor()
-        curs.execute("SELECT max(dbid) FROM gp_configuration")
-        rows = curs.fetchall()
-        if len(rows) != 1:
-            raise Exception, 'Failed to retrieve maximum dbid from catalog'
-        return rows[0][0]
-    finally:
-        curs.close()
-
 #-----------------------------------------------
 class PySync(Command):
     def __init__(self,name,srcDir,dstHost,dstDir,ctxt=LOCAL,remoteHost=None, options=None):
@@ -1311,7 +1300,6 @@ class GpError(Exception): pass
 
 ######
 def get_user():
-    logger.debug("Checking if LOGNAME or USER env variable is set.")
     username = os.environ.get('LOGNAME') or os.environ.get('USER')
     if not username:
         raise GpError('Environment Variable LOGNAME or USER not set')
@@ -1319,7 +1307,6 @@ def get_user():
 
 
 def get_gphome():
-    logger.debug("Checking if GPHOME env variable is set.")
     gphome=os.getenv('GPHOME',None)
     if not gphome:
         raise GpError('Environment Variable GPHOME not set')
@@ -1328,7 +1315,6 @@ def get_gphome():
 
 ######
 def get_masterdatadir():
-    logger.debug("Checking if MASTER_DATA_DIRECTORY env variable is set.")
     master_datadir = os.environ.get('MASTER_DATA_DIRECTORY')
     if not master_datadir:
         raise GpError("Environment Variable MASTER_DATA_DIRECTORY not set!")

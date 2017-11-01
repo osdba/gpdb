@@ -368,7 +368,7 @@ exec_command(const char *cmd,
 					success = describeTableDetails(pattern, show_verbose, show_system);
 				else
 					/* standard listing of interesting things */
-					success = listTables("tvsxr", NULL, show_verbose, show_system);
+					success = listTables("tvsEr", NULL, show_verbose, show_system);
 				break;
 			case 'a':
 				success = describeAggregates(pattern, show_verbose, show_system);
@@ -524,7 +524,13 @@ exec_command(const char *cmd,
 	 */
 	else if (strcmp(cmd, "ef") == 0)
 	{
-		if (!query_buf)
+		if (pset.sversion < 80400)
+		{
+			psql_error("The server (version %d.%d) does not support editing function source.\n",
+					   pset.sversion / 10000, (pset.sversion / 100) % 100);
+			status = PSQL_CMD_ERROR;
+		}
+		else if (!query_buf)
 		{
 			psql_error("no query buffer\n");
 			status = PSQL_CMD_ERROR;

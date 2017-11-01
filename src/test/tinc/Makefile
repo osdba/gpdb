@@ -28,15 +28,6 @@ TESTER=tinc.py
 
 DISCOVER=discover
 
-storage_targets: discover_targets non_discover_targets
-
-discover_targets: storage walrep_multinode \
-	pgtwophase \
-	filerep_schematopology_crashrecov
-
-non_discover_targets: aoco_compression filerep_end_to_end fts
-
-
 # cs-storage
 # The following targets are pulled from:
 # http://pulse-cloud.gopivotal.com/admin/projects/cs-storage
@@ -75,12 +66,6 @@ storage_filerep:
 	-s tincrepo/mpp/gpdb/tests/storage/filerep
 
 # cs-walrepl-multinode
-# The following targets are pulled from:
-# http://pulse-cloud.gopivotal.com/admin/projects/cs-walrepl-multinode
-#
-# Refer to the properties of the pulse project and individual build
-# stages for configuration requirements.
-
 walrep_1:
 	$(TESTER) $(DISCOVER) -t tincrepo/mpp/gpdb/tests/storage/walrepl \
 	-s gpactivatestandby \
@@ -94,7 +79,6 @@ walrep_1:
 walrep_2:
 	$(TESTER) $(DISCOVER) -t tincrepo/mpp/gpdb/tests/storage/walrepl \
 	-s basebackup \
-	-s crash \
 	-s filerep \
 	-s oom \
 	-s regress \
@@ -103,34 +87,9 @@ walrep_2:
 	-s walreceiver \
 	-s walsender \
 	-s xact \
+	-s crash \
 	-q "class!=DDLTestCase" \
 	-q "class!=DMLTestCase"
-
-
-# cs-aoco-compression
-# The following targets are pulled from:
-# http://pulse-cloud.gopivotal.com/admin/projects/cs-aoco-compression
-#
-# Refer to the properties of the pulse project and individual build
-# stages for configuration requirements.
-
-aoco_compression_large_01:
-	$(TESTER) mpp.gpdb.tests.storage.aoco_compression.test_func_aococompression_large_01
-
-aoco_compression_large_02:
-	$(TESTER) mpp.gpdb.tests.storage.aoco_compression.test_func_aococompression_large_02
-
-aoco_compression_large_03:
-	$(TESTER) mpp.gpdb.tests.storage.aoco_compression.test_func_aococompression_large_03
-
-aoco_compression_large_04:
-	$(TESTER) mpp.gpdb.tests.storage.aoco_compression.test_func_aococompression_large_04
-
-aoco_compression_small:
-	$(TESTER) mpp.gpdb.tests.storage.aoco_compression.test_func_aococompression_small
-
-aoco_compression_small_serial:
-	$(TESTER) mpp.gpdb.tests.storage.aoco_compression.test_func_aococompression_small_serial
 
 # cs-filerep-end-to-end
 # The following targets are pulled from:
@@ -262,7 +221,6 @@ optimizer_functional_part1:
 	$(TESTER) $(DISCOVER) \
 	-s partitioning \
 	-s query \
-	-s ddl \
 	-q tags=ORCA \
 	-q tags!=FEATURE_BRANCH_ONLY \
 	-q tags!=dpe
@@ -270,7 +228,6 @@ optimizer_functional_part1:
 optimizer_functional_part2:
 	$(TESTER) $(DISCOVER) \
 	-s dml \
-	-s functions \
 	-q tags=ORCA \
 	-q tags!=FEATURE_BRANCH_ONLY \
 	-q tags!=dpe
@@ -288,3 +245,14 @@ memory_accounting:
 	$(TESTER) \
 		resource_management.memory_accounting.test_oom.OOMTestCase \
 		resource_management.memory_accounting.too_many_exec_accounts.test_exec_accounts
+
+# gpexpand test
+gpexpand_1:
+	$(TESTER) $(DISCOVER) \
+	-s mpp/gpdb/tests/utilities/gpexpand \
+	-q tags=part1
+
+gpexpand_2:
+	$(TESTER) $(DISCOVER) \
+	-s mpp/gpdb/tests/utilities/gpexpand \
+	-q tags=part2

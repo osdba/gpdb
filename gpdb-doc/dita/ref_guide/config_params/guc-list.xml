@@ -57,7 +57,7 @@
             <li>
               <xref href="#custom_variable_classes"/>
             </li>
-            <li><xref href="#heap_checksums" format="dita"/></li>
+            <li><xref href="#data_checksums" format="dita"/></li>
             <li>
               <xref href="#DateStyle"/>
             </li>
@@ -267,6 +267,8 @@
             <li>
               <xref href="#gp_enable_relsize_collection" format="dita"/></li>
             <li>
+              <xref href="#gp_enable_segment_copy_checking" format="dita"/></li>
+            <li>
               <xref href="#gp_enable_sequential_window_plans"/>
             </li>
             <li>
@@ -328,6 +330,9 @@
               <xref href="#topic_lvm_ttc_3p"/>
             </li>
             <li>
+              <xref href="#gp_interconnect_debug_retry_interval"/>
+            </li>
+            <li>
               <xref href="#gp_interconnect_fc_method"/>
             </li>
             <li>
@@ -345,11 +350,15 @@
             <li>
               <xref href="#gp_interconnect_type"/>
             </li>
+            <li><xref href="#gp_log_interconnect"/>
+            </li>
             <li>
               <xref href="#gp_log_format"/>
             </li>
             <li>
               <xref href="#gp_log_fts"/>
+            </li>
+            <li><xref href="#gp_log_interconnect"/>
             </li>
             <li>
               <xref href="#gp_log_gang"/>
@@ -381,11 +390,24 @@
             <li>
               <xref href="#gp_num_contents_in_cluster"/>
             </li>
+            <li><xref href="#gp_recursive_cte_prototype"/></li>
             <li>
               <xref href="#gp_reject_percent_threshold"/>
             </li>
             <li>
               <xref href="#gp_reraise_signal"/>
+            </li>
+            <li>
+              <xref href="#gp_resgroup_memory_policy"/>
+            </li>
+            <li>
+              <xref href="#gp_resource_group_cpu_limit"/>
+            </li>
+            <li>
+              <xref href="#gp_resource_group_memory_limit"/>
+            </li>
+            <li>
+              <xref href="#gp_resource_manager"/>
             </li>
             <li>
               <xref href="#gp_resqueue_memory_policy"/>
@@ -468,6 +490,7 @@
             <li>
               <xref href="#gpperfmon_port"/>
             </li>
+            <li><xref href="#ignore_checksum_failure" format="dita"/></li>
             <li>
               <xref href="#integer_datetimes"/>
             </li>
@@ -569,6 +592,9 @@
               <xref href="#log_statement_stats"/>
             </li>
             <li>
+              <xref href="#log_temp_files"/>
+            </li>
+            <li>
               <xref href="#log_timezone"/>
             </li>
             <li>
@@ -608,6 +634,9 @@
               <xref href="#max_resource_portals_per_transaction"/>
             </li>
             <li>
+              <xref href="#max_resource_groups"/>
+            </li>
+            <li>
               <xref href="#max_resource_queues"/>
             </li>
             <li>
@@ -615,6 +644,9 @@
             </li>
             <li>
               <xref href="#max_statement_mem"/>
+            </li>
+            <li>
+              <xref href="#memory_spill_ratio"/>
             </li>
             <li>
               <xref href="#optimizer" type="section">optimizer</xref>
@@ -643,6 +675,9 @@
             <li>
               <xref href="#optimizer_force_three_stage_scalar_dqa" type="section"
                 >optimizer_force_three_stage_scalar_dqa</xref>
+            </li>
+            <li><xref href="#optimizer_join_arity_for_associativity_commutativity" type="section"
+                >optimizer_join_arity_for_associativity_commutativity</xref>
             </li>
             <li>
               <xref href="#optimizer_join_order_threshold" type="section"
@@ -1140,8 +1175,7 @@
           <tbody>
             <row>
               <entry colname="col1">DEBUG5
-                  <p>DEBUG4</p><p>DEBUG3</p><p>DEBUG2</p><p>DEBUG1</p><p>LOG
-                  NOTICE</p><p>WARNING</p><p>ERROR</p><p>FATAL</p><p>PANIC</p></entry>
+                  <p>DEBUG4</p><p>DEBUG3</p><p>DEBUG2</p><p>DEBUG1</p><p>LOG</p><p>NOTICE</p><p>WARNING</p><p>ERROR</p><p>FATAL</p><p>PANIC</p></entry>
               <entry colname="col2">NOTICE</entry>
               <entry colname="col3">master<p>session</p><p>reload</p></entry>
             </row>
@@ -1295,10 +1329,28 @@
       </table>
     </body>
   </topic>
-  <topic id="heap_checksums">
+  <topic id="data_checksums">
     <title>data_checksums</title>
     <body>
-      <p>Reports whether heap checksums are enabled in the database system. </p>
+      <p>Reports whether checksums are enabled for heap data storage in the database system.
+        Checksums for heap data are enabled or disabled when the database system is initialized and
+        cannot be changed. </p>
+      <p>Heap data pages store heap tables, catalog tables, indexes, and database metadata.
+        Append-optimized storage has built-in checksum support that is unrelated to this
+        parameter.</p>
+      <p>Greenplum Database uses checksums to prevent loading data corrupted in the file system into
+        memory managed by database processes. When heap data checksums are enabled, Greenplum
+        Database computes and stores checksums on heap data pages when they are written to disk.
+        When a page is retrieved from disk, the checksum is verified. If the verification fails, an
+        error is generated and the page is not permitted to load into managed memory. </p>
+      <p>If the <codeph>ignore_checksum_failure</codeph> configuration parameter has been set to on,
+        a failed checksum verification generates a warning, but the page is allowed to be loaded
+        into managed memory. If the page is then updated, it is flushed to disk and replicated to
+        the mirror. This can cause data corruption to propagate to the mirror and prevent a complete
+        recovery. Because of the potential for data loss, the
+          <codeph>ignore_checksum_failure</codeph> parameter should only be enabled when needed to
+        recover data. See <xref href="#ignore_checksum_failure" format="dita"/> for more
+        information.</p>
       <table id="table_djn_1nb_v1b">
         <tgroup cols="3">
           <colspec colnum="1" colname="col1" colwidth="1*"/>
@@ -1628,8 +1680,8 @@
           </thead>
           <tbody>
             <row>
-              <entry colname="col1">integer &gt; 0</entry>
-              <entry colname="col2">25</entry>
+              <entry colname="col1"> 0 > Integer > 10000</entry>
+              <entry colname="col2">100</entry>
               <entry colname="col3">master<p>session</p><p>reload</p></entry>
             </row>
           </tbody>
@@ -2867,8 +2919,8 @@
           <codeph>APPENDONLY=TRUE</codeph> in the <cmdname>WITH</cmdname> clause.</p>
       <p>This example <cmdname>gpconfig</cmdname> utility command sets the default storage option
         for a Greenplum Database system. If you set the defaults for multiple table storage options,
-        the value must be enclosed in single quotes and then in double
-        quotes.<codeblock>gpconfig -c 'gp_default_storage_options' -v "'appendonly=true, orientation=column'"</codeblock></p>
+        the value must be enclosed in single
+        quotes.<codeblock>gpconfig -c 'gp_default_storage_options' -v 'appendonly=true, orientation=column'</codeblock></p>
       <p>This example <cmdname>gpconfig</cmdname> utility command shows the value of the parameter.
         The parameter value must be consistent across the Greenplum Database master and all
         segments.<codeblock>gpconfig -s 'gp_default_storage_options'</codeblock></p>
@@ -3491,6 +3543,37 @@
       </table>
     </body>
   </topic>
+  <topic id="gp_enable_relsize_collection">
+    <title>gp_enable_relsize_collection</title>
+    <body>
+      <p>Enables the legacy query optimizer (planner) to use the estimated size of a table
+          (<codeph>pg_relation_size</codeph> function) if there are no statistics for the table. By
+        default, the planner uses a default value to estimate the number of rows if statistics are
+        not available. The default behavior improves query optimization time and reduces resource
+        queue usage in heavy workloads, but can lead to suboptimal plans.</p>
+      <table id="table_b2v_b5t_3x">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">Boolean</entry>
+              <entry colname="col2">off</entry>
+              <entry colname="col3">master<p>session</p><p>reload</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
   <topic id="gp_enable_sequential_window_plans">
     <title>gp_enable_sequential_window_plans</title>
     <body>
@@ -3520,15 +3603,32 @@
       </table>
     </body>
   </topic>
-  <topic id="gp_enable_relsize_collection">
-    <title>gp_enable_relsize_collection</title>
+  <topic id="gp_enable_segment_copy_checking">
+    <title>gp_enable_segment_copy_checking</title>
     <body>
-      <p>Enables the legacy query optimizer (planner) to use the estimated size of a table
-          (<codeph>pg_relation_size</codeph> function) if there are no statistics for the table. By
-        default, the planner uses a default value to estimate the number of rows if statistics are
-        not available. The default behavior improves query optimization time and reduces resource
-        queue usage in heavy workloads, but can lead to suboptimal plans.</p>
-      <table id="table_b2v_b5t_3x">
+      <p>Controls whether the distribution policy for a table (from the table
+          <codeph>DISTRIBUTED</codeph> clause) is checked when data is copied into the table with
+        the <codeph>COPY FROM...ON SEGMENT</codeph> command. The default is <codeph>true</codeph>,
+        check the policy when copying data into the table. An error is returned in these
+          situations.<ul id="ul_nmf_sqm_z1b">
+          <li>For a table that is not a partitioned table, an error is returned if the row of data
+            violates the distribution policy for a segment instance.</li>
+          <li>For a partitioned table, an error is returned if either of the following is true.<ul
+              id="ul_yqz_dsm_z1b">
+              <li>If the distribution policy of the child leaf partitioned table is the same as the
+                root table and the row of data violates the distribution policy for a segment
+                instance.</li>
+              <li>If the distribution policy of the child leaf partitioned table is not the same as
+                the root table. </li>
+            </ul></li>
+        </ul></p>
+      <p>If the value is <codeph>false</codeph>, the distribution policy is not checked. The data
+        added to the table might violate the table distribution policy for the segment instance.
+        Manual redistribution of table data might be required. See the <codeph>ALTER TABLE</codeph>
+        clause <codeph>WITH REORGANIZE</codeph>.</p>
+      <p>The parameter can be set for a database system or a session. The parameter cannot be set
+        for a specific database.</p>
+      <table id="table_gxf_hpm_z1b">
         <tgroup cols="3">
           <colspec colnum="1" colname="col1" colwidth="1*"/>
           <colspec colnum="2" colname="col2" colwidth="1*"/>
@@ -3543,7 +3643,7 @@
           <tbody>
             <row>
               <entry colname="col1">Boolean</entry>
-              <entry colname="col2">off</entry>
+              <entry colname="col2">true</entry>
               <entry colname="col3">master<p>session</p><p>reload</p></entry>
             </row>
           </tbody>
@@ -3898,6 +3998,43 @@
       </table>
     </body>
   </topic>
+  <topic id="gp_log_interconnect">
+    <title>gp_log_interconnect</title>
+    <body>
+      <p>Controls the amount of information that is written to the log file about communication
+        between Greenplum Database segment instance worker processes. The default value is
+          <codeph>terse</codeph>. The log information is written to both the master and segment
+        instance logs.</p>
+      <p>Increasing the amount of logging could affect performance and increase disk space
+        usage.</p>
+      <table id="table_xkm_nqr_y1b">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">
+                <p>off</p>
+                <p>terse</p>
+                <p>verbose</p>
+                <p>debug</p>
+              </entry>
+              <entry colname="col2">terse</entry>
+              <entry colname="col3">master<p>session</p><p>reload</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
   <topic id="gp_log_gang">
     <title>gp_log_gang</title>
     <body>
@@ -4132,6 +4269,39 @@
             <row>
               <entry colname="col1">integer 0 - <codeph>INT_MAX</codeph></entry>
               <entry colname="col2">1000</entry>
+              <entry colname="col3">master<p>session</p><p>reload</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="gp_interconnect_debug_retry_interval">
+    <title>gp_interconnect_debug_retry_interval</title>
+    <body>
+      <p>Specifies the interval, in seconds, to log Greenplum Database interconnect debugging
+        messages when the server configuration parameter <codeph><xref href="#gp_log_interconnect"
+            format="dita">gp_log_interconnect</xref></codeph> is set to <codeph>DEBUG</codeph>. The
+        default is 10 seconds. </p>
+      <p>The log messages contain information about the interconnect communication between Greenplum
+        Database segment instance worker processes. The information can be helpful when debugging
+        network issues between segment instances.</p>
+      <table id="table_q1n_v4r_y1b">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">1 =&lt; Integer &lt; 4096</entry>
+              <entry colname="col2">10</entry>
               <entry colname="col3">master<p>session</p><p>reload</p></entry>
             </row>
           </tbody>
@@ -4619,6 +4789,46 @@
       </table>
     </body>
   </topic>
+  <topic id="gp_recursive_cte_prototype">
+    <title>gp_recursive_cte_prototype</title>
+    <body>
+      <p>Controls the availability of the experimental keyword <codeph>RECURSIVE</codeph> in the
+          <codeph>WITH</codeph> clause of a <codeph>SELECT[ INTO]</codeph> command. The keyword
+        allows a subquery in the <codeph>WITH</codeph> clause of a <codeph>SELECT[ INTO]</codeph>
+        command to reference itself. The default value is <codeph>false</codeph>, the keyword is not
+        allowed in the <codeph>WITH</codeph> clause a <codeph>SELECT[ INTO]</codeph> command.</p>
+      <note type="warning">The <codeph>RECURSIVE</codeph> keyword is an experimental feature and is
+        not intended for use in a production environment. Experimental features are subject to
+        change without notice in future releases.</note>
+      <p>For information about the experimental keyword <codeph>RECURSIVE</codeph>, see the
+          <codeph>SELECT</codeph> command.</p>
+      <p>The parameter can be set for a database system, an individual database, or a session or
+        query.</p>
+      <note>This parameter will be removed if the <codeph>RECURSIVE</codeph> keyword is promoted
+        from experimental or if the keyword is removed from Greenplum Database.</note>
+      <table id="table_j4s_yyx_1bb">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">Boolean</entry>
+              <entry colname="col2">false</entry>
+              <entry colname="col3">master<p>session</p><p>restart</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
   <topic id="gp_reject_percent_threshold">
     <title>gp_reject_percent_threshold</title>
     <body>
@@ -4668,6 +4878,119 @@
               <entry colname="col1">Boolean</entry>
               <entry colname="col2">on</entry>
               <entry colname="col3">master<p>session</p><p>reload</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="gp_resgroup_memory_policy">
+    <title>gp_resgroup_memory_policy</title>
+    <body>
+      <p>Used by a resource group to manage memory allocation to query operators.</p>
+      <p>When set to <codeph>auto</codeph>, Greenplum Database uses resource group memory limits to distribute memory across query operators, allocating a fixed size of memory to non-memory-intensive operators and the rest to memory-intensive operators.</p>
+      <p>When you specify <codeph>eager_free</codeph>, Greenplum Database distributes memory among operators more optimally by re-allocating memory released by operators that have completed their processing to operators in a later query stage.</p>
+      <table id="gp_resgroup_memory_policy_table">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">auto, eager_free</entry>
+              <entry colname="col2">eager_free</entry>
+              <entry colname="col3">local<p>system</p><p>superuser</p><p>restart/reload</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="gp_resource_group_cpu_limit">
+    <title>gp_resource_group_cpu_limit</title>
+    <body>
+      <p>Identifies the maximum percentage of system CPU resources to allocate to resource groups on
+        each Greenplum Database segment node.</p>
+      <table id="gp_resource_group_cpu_limit_table">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">0.1 - 1.0</entry>
+              <entry colname="col2">0.9</entry>
+              <entry colname="col3">local<p>system</p><p>restart</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="gp_resource_group_memory_limit">
+    <title>gp_resource_group_memory_limit</title>
+    <body>
+      <p>Identifies the maximum percentage of system memory resources to allocate to resource groups
+        on each Greenplum Database segment node.</p>
+      <table id="gp_resource_group_memory_limit_table">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">0.1 - 1.0</entry>
+              <entry colname="col2">0.9</entry>
+              <entry colname="col3">local<p>system</p><p>restart</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="gp_resource_manager">
+    <title>gp_resource_manager</title>
+    <body>
+      <p>Identifies the resource management scheme currently enabled in the Greenplum Database
+        cluster. The default scheme is to use resource queues.</p>
+      <table id="gp_resource_manager_table">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">group <p>queue</p></entry>
+              <entry colname="col2">queue</entry>
+              <entry colname="col3">local<p>system</p><p>restart</p></entry>
             </row>
           </tbody>
         </tgroup>
@@ -5363,9 +5686,9 @@
     <title>gp_workfile_compress_algorithm</title>
     <body>
       <p>When a hash aggregation or hash join operation spills to disk during query processing,
-        specifies the compression algorithm to use on the spill files. If using zlib, it must be in
-        your $PATH on all segments.</p>
-      <p>If your Greenplum database installation uses serial ATA (SATA) disk drives, setting the
+        specifies the compression algorithm to use on the spill files. If using zlib, the zlib
+        library must be installed on all hosts in the Greenplum Database cluster. </p>
+      <p>If your Greenplum Database installation uses serial ATA (SATA) disk drives, setting the
         value of this parameter to <codeph>zlib</codeph> might help to avoid overloading the disk
         subsystem with IO operations.</p>
       <table id="gp_workfile_compress_algorithm_table">
@@ -5501,6 +5824,47 @@
               <entry colname="col1">integer</entry>
               <entry colname="col2">8888</entry>
               <entry colname="col3">master<p>system</p><p>restart</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="ignore_checksum_failure">
+    <title>ignore_checksum_failure</title>
+    <body>
+      <p>Only has effect if <xref href="#data_checksums" format="dita"/> is enabled.</p>
+      <p>Greenplum Database uses checksums to prevent loading data that has been corrupted in the
+        file system into memory managed by database processes. </p>
+      <p>By default, when a checksum verify error occurs when reading a heap data page, Greenplum
+        Database generates an error and prevents the page from being loaded into managed memory.
+        When <codeph>ignore_checksum_failure</codeph> is set to on and a checksum verify failure
+        occurs, Greenplum Database generates a warning, and allows the page to be read into managed
+        memory. If the page is then updated it is saved to disk and replicated to the mirror. If the
+        page header is corrupt an error is reported even if this option is enabled. </p>
+      <note type="warning"> Setting <codeph>ignore_checksum_failure</codeph> to on may propagate or
+        hide data corruption or lead to other serious problems. However, if a checksum failure has
+        already been detected and the page header is uncorrupted, setting
+          <codeph>ignore_checksum_failure</codeph> to on may allow you to bypass the error and
+        recover undamaged tuples that may still be present in the table. </note>
+      <p>The default setting is off, and it can only be changed by a superuser.</p>
+      <table id="table_shd_32q_v1b">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">Boolean</entry>
+              <entry colname="col2">off</entry>
+              <entry colname="col3">local<p>system</p><p>restart</p></entry>
             </row>
           </tbody>
         </tgroup>
@@ -6447,6 +6811,40 @@
       </table>
     </body>
   </topic>
+  <topic id="log_temp_files">
+    <title>log_temp_files</title>
+    <body>
+      <p>Controls logging of temporary file names and sizes. Temporary files can be created for
+        sorts, hashes, temporary query results and spill files. A log entry is made in
+          <codeph>pg_log</codeph> for each temporary file when it is deleted. Depending on the
+        source of the temporary files, the log entry could be created on either the master and/or
+        segments. A <codeph>log_temp_files</codeph> value of zero logs all temporary file
+        information, while positive values log only files whose size is greater than or equal to the
+        specified number of kilobytes. The default setting is <codeph>-1</codeph>, which disables
+        logging. Only superusers can change this setting.</p>
+      <table id="log_temp_files_table">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">Integer</entry>
+              <entry colname="col2">-1</entry>
+              <entry colname="col3">local<p>system</p><p>restart</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
   <topic id="log_timezone">
     <title>log_timezone</title>
     <body>
@@ -6823,7 +7221,7 @@
     <body>
       <p>Sets the maximum number of simultaneously open user-declared cursors allowed per
         transaction. Note that an open cursor will hold an active query slot in a resource queue.
-        Used for workload management.</p>
+        Used for resource management.</p>
       <table id="max_resource_portals_per_transaction_table">
         <tgroup cols="3">
           <colspec colnum="1" colname="col1" colwidth="1*"/>
@@ -6847,13 +7245,41 @@
       </table>
     </body>
   </topic>
+  <topic id="max_resource_groups">
+    <title>max_resource_groups</title>
+    <body>
+      <p>Sets the maximum number of resource groups that you can create in a Greenplum Database
+        system. Resource groups are defined system-wide.</p>
+      <table id="max_resource_queues_table">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">0 - INT_MAX</entry>
+              <entry colname="col2">9</entry>
+              <entry colname="col3">master<p>system</p><p>restart</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
   <topic id="max_resource_queues">
     <title>max_resource_queues</title>
     <body>
       <p>Sets the maximum number of resource queues that can be created in a Greenplum Database
         system. Note that resource queues are system-wide (as are roles) so they apply to all
         databases in the system.</p>
-      <table id="max_resource_queues_table">
+      <table id="max_resource_groups_table">
         <tgroup cols="3">
           <colspec colnum="1" colname="col1" colwidth="1*"/>
           <colspec colnum="2" colname="col2" colwidth="1*"/>
@@ -6911,14 +7337,18 @@
     <title>max_statement_mem</title>
     <body>
       <p>Sets the maximum memory limit for a query. Helps avoid out-of-memory errors on a segment
-        host during query processing as a result of setting <xref href="#statement_mem"
-          format="dita"/> too high. When <xref href="#gp_resqueue_memory_policy" format="dita"
-        />=auto, statement_mem and resource queue memory limits control query memory usage. Taking
-        into account the configuration of a single segment host, calculate this setting as
-        follows:</p>
+        host during query processing as a result of setting <codeph><xref href="#statement_mem"
+            format="dita"/>
+        </codeph>too high. When <codeph><xref href="#gp_resqueue_memory_policy" format="dita"
+          />=auto</codeph>, <codeph>statement_mem</codeph> and resource queue memory limits control
+        query memory usage. Taking into account the configuration of a single segment host,
+        calculate this setting as follows:</p>
       <p>
         <codeph>(seghost_physical_memory) / (average_number_concurrent_queries)</codeph>
       </p>
+      <p>When changing both <codeph>max_statement_mem</codeph> and <codeph>statement_mem</codeph>,
+          <codeph>max_statement_mem</codeph> must be changed first, or listed first in the
+          <systemoutput>postgresql.conf</systemoutput> file.</p>
       <table id="max_statement_mem_table">
         <tgroup cols="3">
           <colspec colnum="1" colname="col1" colwidth="1*"/>
@@ -6936,6 +7366,41 @@
               <entry colname="col1">number of kilobytes</entry>
               <entry colname="col2">2000MB</entry>
               <entry colname="col3">master<p>session</p><p>reload</p><p>superuser</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="memory_spill_ratio">
+    <title>memory_spill_ratio</title>
+    <body>
+      <p>Sets the memory usage threshold for memory-intensive operators in a transaction. When a
+        transaction reaches this threshold, it spills to disk.</p>
+      <p>The default <codeph>memory_spill_ratio</codeph> is the value defined for the resource group
+        assigned to the currently active role. You can set <codeph>memory_spill_ratio</codeph> at
+        the session level to selectively set this limit on a per-query basis. For example, if you
+        have a specific query that spills to disk and requires more memory, you may choose to set a
+        larger <codeph>memory_spill_ratio</codeph> to increase the initial memory allocation.</p>
+      <p>When you set <codeph>memory_spill_ratio</codeph> at the session level, Greenplum Database
+        does not perform semantic validation on the new value until you next perform a query.</p>
+      <table id="memory_spill_ratio_table">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">0 - 100</entry>
+              <entry colname="col2">20</entry>
+              <entry colname="col3">master<p>session</p><p>reload</p></entry>
             </row>
           </tbody>
         </tgroup>
@@ -7212,6 +7677,43 @@
               <entry colname="col1">Boolean</entry>
               <entry colname="col2">true</entry>
               <entry colname="col3">master<p>session</p><p>reload</p></entry>
+            </row>
+          </tbody>
+        </tgroup>
+      </table>
+    </body>
+  </topic>
+  <topic id="optimizer_join_arity_for_associativity_commutativity">
+    <title>optimizer_join_arity_for_associativity_commutativity</title>
+    <body>
+      <p>The value is an optimization hint to limit the number of join associativity and join
+        commutativity transformations explored during query optimization. The limit controls the
+        alternative plans that GPORCA considers during query optimization. For example, the default
+        value of 7 is a optimization hint for GPORCA to stop exploring join associativity and join
+        commutativity transformations when an n-ary join operator has more than 7 children during
+        optimization.</p>
+      <p>For a query with a large number of joins, specifying a lower value improves query
+        performance by limiting the number of alternate query plans that GPORCA evaluates. However,
+        setting the value too low might cause GPORCA to generate a query plan that performs
+        sub-optimally.</p>
+      <p>This parameter can be set for a database system or a session.</p>
+      <table id="table_lfq_3zg_nbb">
+        <tgroup cols="3">
+          <colspec colnum="1" colname="col1" colwidth="1*"/>
+          <colspec colnum="2" colname="col2" colwidth="1*"/>
+          <colspec colnum="3" colname="col3" colwidth="1*"/>
+          <thead>
+            <row>
+              <entry colname="col1">Value Range</entry>
+              <entry colname="col2">Default</entry>
+              <entry colname="col3">Set Classifications</entry>
+            </row>
+          </thead>
+          <tbody>
+            <row>
+              <entry colname="col1">integer > 0</entry>
+              <entry colname="col2">7</entry>
+              <entry colname="col3">local<p>system</p><p>reload</p></entry>
             </row>
           </tbody>
         </tgroup>
@@ -8410,10 +8912,11 @@
     <title>statement_mem</title>
     <body>
       <p>Allocates segment host memory per query. The amount of memory allocated with this parameter
-        cannot exceed <xref href="#max_statement_mem" format="dita"/> or the memory limit on the
-        resource queue through which the query was submitted. When <xref
-          href="#gp_resqueue_memory_policy" format="dita"/> =auto, <codeph>statement_mem</codeph>
-        and resource queue memory limits control query memory usage. </p>
+        cannot exceed <codeph><xref href="#max_statement_mem" format="dita"/></codeph> or the memory
+        limit on the resource queue through which the query was submitted. When <codeph><xref
+            href="#gp_resqueue_memory_policy" format="dita"/> =auto</codeph>,
+          <codeph>statement_mem</codeph> and resource queue memory limits control query memory
+        usage. </p>
       <p>If additional memory is required for a query, temporary spill files on disk are used.</p>
       <p>This calculation can be used to estimate a reasonable value for a wide variety of
         situations.</p>
@@ -8423,6 +8926,9 @@
       <p>
         <codeblock>(8GB * .9) / 40 = .18GB = 184MB</codeblock>
       </p>
+      <p>When changing both <codeph>max_statement_mem</codeph> and <codeph>statement_mem</codeph>,
+          <codeph>max_statement_mem</codeph> must be changed first, or listed first in the
+          <systemoutput>postgresql.conf</systemoutput> file.</p>
       <table id="statement_mem_table">
         <tgroup cols="3">
           <colspec colnum="1" colname="col1" colwidth="1*"/>

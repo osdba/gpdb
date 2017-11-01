@@ -1317,30 +1317,9 @@ select ord, pn,cn,vn,sum(vn) over (order by ord, pn rows between cn following an
 -- MPP-2323
 select ord, cn,vn,sum(vn) over (order by ord rows between 3 following and floor(cn) following ) from sale_ord;
 
--- Test use of window functions in places they shouldn't be allowed: MPP-2382
--- CHECK constraints
-CREATE TABLE wintest_for_window_seq (i int check (i < count(*) over (order by i)));
-
-CREATE TABLE wintest_for_window_seq (i int default count(*) over (order by i));
-
--- index expression and function
-CREATE TABLE wintest_for_window_seq (i int);
-CREATE INDEX wintest_idx_for_window_seq on wintest_for_window_seq (i) where i < count(*) over (order by i);
-CREATE INDEX wintest_idx_for_window_seq on wintest_for_window_seq (sum(i) over (order by i));
--- alter table
-ALTER TABLE wintest_for_window_seq alter i set default count(*) over (order by i);
-alter table wintest_for_window_seq alter column i type float using count(*) over (order by
-i)::float;
-
--- update
-insert into wintest_for_window_seq values(1);
-update wintest_for_window_seq set i = count(*) over (order by i);
-
 -- domain suport
 create domain wintestd as int default count(*) over ();
 create domain wintestd as int check (value < count(*) over ());
-
-drop table wintest_for_window_seq;
 
 -- MPP-3295
 -- begin equivalent
@@ -1415,8 +1394,11 @@ from product
 window w as (partition by pcolor order by pname)
 order by 1,2,3;
 
--- MPP-4840
+-- Once upon a time, there was a bug in deparsing a WindowAgg node with EXPLAIN
+-- that this query triggered (MPP-4840)
 explain select n from ( select row_number() over () from (values (0)) as t(x) ) as r(n) group by n;
+
+
 -- Test for MPP-11645
 
 create table olap_window_r (a int, b int, x int,  y int,  z int ) distributed by (b);
@@ -1623,7 +1605,7 @@ from empsalary;
 --                       
 -- ----------------------------------------------------------------------------------------------------------------------
 --  Gather Motion 2:1  (slice3; segments: 2)  (cost=3.56..3.60 rows=5 width=12)
---    ->  Window  (cost=3.56..3.60 rows=3 width=12)
+--    ->  WindowAgg  (cost=3.56..3.60 rows=3 width=12)
 --          Partition By: bar.a
 --          Order By: bar.b
 --          ->  Sort  (cost=3.56..3.57 rows=3 width=12)
@@ -1665,3 +1647,19 @@ SELECT bar.*, count(*) OVER() AS e FROM foo, bar where foo.b = bar.d;
 
 reset optimizer_segments;
 drop table foo, bar;
+
+
+CREATE TABLE foo (a int, b int, c int, d int);
+insert into foo select i,i,i,i from generate_series(1, 10) i;
+
+-- Check that the planner can spot ORDER BYs that are supersets of each
+-- other, and sort directly to the longest sort order. This query can
+-- be satisfied with just two Sorts.
+EXPLAIN SELECT count(*) over (PARTITION BY a ORDER BY b, c, d) as count1,
+       count(*) over (PARTITION BY a ORDER BY b, c) as count2,
+       count(*) over (PARTITION BY a ORDER BY b) as count3,
+       count(*) over (PARTITION BY a ORDER BY c) as count1,
+       count(*) over (PARTITION BY a ORDER BY c, b) as count2,
+       count(*) over (PARTITION BY a ORDER BY c, b, d) as count3
+FROM foo;
+drop table foo;

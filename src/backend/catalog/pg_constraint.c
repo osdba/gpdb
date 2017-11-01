@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/catalog/pg_constraint.c,v 1.38 2008/01/17 18:56:54 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/catalog/pg_constraint.c,v 1.40 2008/03/26 21:10:37 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -31,6 +31,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 
 /*
@@ -178,8 +179,7 @@ CreateConstraintEntry(const char *constraintName,
 	 * initialize the binary form of the check constraint.
 	 */
 	if (conBin)
-		values[Anum_pg_constraint_conbin - 1] = DirectFunctionCall1(textin,
-													CStringGetDatum((char *) conBin));
+		values[Anum_pg_constraint_conbin - 1] = CStringGetTextDatum(conBin);
 	else
 		nulls[Anum_pg_constraint_conbin - 1] = true;
 
@@ -187,8 +187,7 @@ CreateConstraintEntry(const char *constraintName,
 	 * initialize the text form of the check constraint
 	 */
 	if (conSrc)
-		values[Anum_pg_constraint_consrc - 1] = DirectFunctionCall1(textin,
-													CStringGetDatum((char *) conSrc));
+		values[Anum_pg_constraint_consrc - 1] = CStringGetTextDatum(conSrc);
 	else
 		nulls[Anum_pg_constraint_consrc - 1] = true;
 
@@ -669,7 +668,7 @@ AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
 						  Oid newNspId, bool isType, ObjectAddresses *objsMoved)
 {
 	Relation	conRel;
-	ScanKeyData	key[1];
+	ScanKeyData key[1];
 	SysScanDesc scan;
 	HeapTuple	tup;
 
@@ -699,7 +698,7 @@ AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
 	while (HeapTupleIsValid((tup = systable_getnext(scan))))
 	{
 		Form_pg_constraint conform = (Form_pg_constraint) GETSTRUCT(tup);
-		ObjectAddress thisobj;
+		ObjectAddress	thisobj;
 
 		thisobj.classId = ConstraintRelationId;
 		thisobj.objectId = HeapTupleGetOid(tup);

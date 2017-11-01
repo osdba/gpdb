@@ -5,7 +5,7 @@
 # Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
-# $PostgreSQL: pgsql/src/backend/Makefile,v 1.125 2008/01/01 19:45:45 momjian Exp $
+# $PostgreSQL: pgsql/src/backend/Makefile,v 1.128 2008/03/17 19:44:40 petere Exp $
 #
 #-------------------------------------------------------------------------
 
@@ -21,8 +21,8 @@ include $(BLD_TOP)/$(ADDON_DIR)/src/Makefile
 endif
 
 SUBDIRS = access bootstrap catalog parser commands executor \
-	fts lib libpq gp_libpq_fe main nodes optimizer port postmaster regex \
-	replication rewrite storage tcop tsearch utils $(top_builddir)/src/timezone cdb\
+	fts lib libpq main nodes optimizer port postmaster regex \
+	replication rewrite storage tcop tsearch utils $(top_builddir)/src/timezone cdb \
 	$(ADDON_SUBDIR)
 
 ifeq ($(enable_orca),yes)
@@ -35,13 +35,13 @@ endif
 
 include $(srcdir)/common.mk
 
-# As of 9/2009:
-# * The probes.o file is necessary for dtrace support on Solaris.
-# * OS X's dtrace doesn't use it and doesn't even recognize the -G option.
-# * Systemtap's dtrace will take -G, but it produces a useless empty file.
-# So, build probes.o only on Solaris.
-# This will likely need adjustment as other platforms add dtrace support.
-ifeq ($(PORTNAME), solaris)
+# As of 1/2010:
+# The probes.o file is necessary for dtrace support on Solaris, and on recent
+# versions of systemtap.  (Older systemtap releases just produce an empty
+# file, but that's okay.)  However, OS X's dtrace doesn't use it and doesn't
+# even recognize the -G option.  So, build probes.o except on Darwin.
+# This might need adjustment as other platforms add dtrace support.
+ifneq ($(PORTNAME), darwin)
 ifeq ($(enable_dtrace), yes)
 LOCALOBJS += utils/probes.o
 endif
@@ -66,6 +66,9 @@ endif
 
 # Greenplum uses threads in the backend
 LIBS := $(LIBS) -lpthread
+
+# Greenplum uses libpq to communicate between QD and QEs
+OBJS := $(OBJS) $(addprefix $(top_builddir)/src/interfaces/libpq/,fe-protocol3_for_backend.o fe-connect_for_backend.o fe-exec.o pqexpbuffer.o fe-auth.o fe-misc.o fe-protocol2.o fe-secure.o getpeereid.o)
 
 ##########################################################################
 

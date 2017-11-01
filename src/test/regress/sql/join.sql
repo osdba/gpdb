@@ -528,3 +528,46 @@ select q1, unique2, thousand, hundred
 select f1, unique2, case when unique2 is null then f1 else 0 end
   from int4_tbl a left join tenk1 b on f1 = unique2
   where (case when unique2 is null then f1 else 0 end) = 0;
+
+
+--
+-- test proper positioning of one-time quals in EXISTS (8.4devel bug)
+--
+prepare foo(bool) as
+select count(*) from tenk1 a left join tenk1 b
+on (a.unique2 = b.unique1 and exists
+(select 1 from tenk1 c where c.thousand = b.unique2 and $1));
+execute foo(true);
+execute foo(false);
+
+--
+-- test NULL behavior of whole-row Vars, per bug #5025
+--
+select t1.q2, count(t2.*)
+from int8_tbl t1 left join int8_tbl t2 on (t1.q2 = t2.q1)
+group by t1.q2 order by 1;
+
+select t1.q2, count(t2.*)
+from int8_tbl t1 left join (select * from int8_tbl) t2 on (t1.q2 = t2.q1)
+group by t1.q2 order by 1;
+
+select t1.q2, count(t2.*)
+from int8_tbl t1 left join (select * from int8_tbl offset 0) t2 on (t1.q2 = t2.q1)
+group by t1.q2 order by 1;
+
+select t1.q2, count(t2.*)
+from int8_tbl t1 left join
+  (select q1, case when q2=1 then 1 else q2 end as q2 from int8_tbl) t2
+  on (t1.q2 = t2.q1)
+group by t1.q2 order by 1;
+
+--
+-- test case where a PlaceHolderVar is propagated into a subquery
+--
+select * from
+  int8_tbl t1 left join
+  (select q1 as x, 42 as y from int8_tbl t2) ss
+  on t1.q2 = ss.x
+where
+  1 = (select 1 from int8_tbl t3 where ss.y is not null limit 1)
+order by 1,2;

@@ -12,22 +12,17 @@
 # or
 #   run(input filename, output filename)
 #
-#
-#
 package atmsort;
 
 #use Data::Dumper; # only used by commented-out debug statements.
 use strict;
 use warnings;
-use File::Spec;
 use File::Temp qw/ tempfile /;
 
 # Load explain.pm from the same directory where atmsort.pm is.
 use FindBin;
 use lib "$FindBin::Bin";
 use explain;
-
-my $glob_id = "";
 
 # optional set of prefixes to identify sql statements, query output,
 # and sorted lines (for testing purposes)
@@ -298,7 +293,6 @@ sub match_then_subs
 
     for my $ff (@{$glob_match_then_sub_fnlist})
     {
-
         # get the function and execute it
         my $fn1 = $ff->[0];
         if (!$glob_verbose)
@@ -403,7 +397,6 @@ m/^WARNING:  Referential integrity \(.*\) constraints are not supported in Green
         # the NOTICE is different from the ERROR case, which does not
         # end with "skipping"
 m/^NOTICE:  \w+ \".*\" does not exist\, skipping\s*$/
-
 
 # the EOF ends the HERE document
 EOF_matchignores
@@ -1279,13 +1272,13 @@ sub atmsort_bigloop
             }
 
             # Note: \d is for the psql "describe"
-            if ($ini =~ m/(?:insert|update|delete|select|\\d|copy)/i)
+            if ($ini =~ m/(?:insert|update|delete|select|\\d|copy|execute)/i)
             {
                 $copy_to_stdout_result = 0;
                 $has_order = 0;
                 $sql_statement = "";
 
-                if ($ini =~ m/explain.*(?:insert|update|delete|select)/i)
+                if ($ini =~ m/explain.*(?:insert|update|delete|select|execute)/i)
                 {
                     $directive->{explain} = 'normal';
                 }
@@ -1296,7 +1289,7 @@ sub atmsort_bigloop
 			# each command has a unique first character. This allows us to
 			# use fewer regular expression matches in this hot section.
 			if ($has_comment &&
-				$ini =~ m/\-\-\s*((force_explain)\s*(operator)?\s*$|(ignore)\s*$|(order)\s+\d+.*$|(mvd)\s+\d+.*$)/)
+				$ini =~ m/\-\-\s*((force_explain)\s*(operator)?\s*$|(ignore)\s*$|(order)\s+(\d+|none).*$|(mvd)\s+\d+.*$)/)
 			{
 				my $cmd = substr($1, 0, 1);
 				if ($cmd eq 'i')
@@ -1307,7 +1300,14 @@ sub atmsort_bigloop
 				{
 					my $olist = $ini;
 					$olist =~ s/^.*\-\-\s*order//;
-					$directive->{order} = $olist;
+					if ($olist =~ /none/)
+					{
+						$directive->{order_none} = 1;
+					}
+					else
+					{
+						$directive->{order} = $olist;
+					}
 				}
 				elsif ($cmd eq 'f')
 				{
@@ -1339,7 +1339,7 @@ sub atmsort_bigloop
             }
 
             # prune notices with segment info if they are duplicates
-            if ($ini =~ m/^\s*(?:NOTICE|ERROR|HINT|DETAIL|WARNING)\:/)
+            if ($ini =~ m/^\s*(?:NOTICE|ERROR|HINT|DETAIL|WARNING)\:.*\(seg.*pid.*\)/)
             {
                 $ini =~ s/\s+(?:\W)?(?:\W)?\(seg.*pid.*\)//;
 
@@ -1431,6 +1431,7 @@ sub atmsort_bigloop
 
                 if (defined($sql_statement)
                     && length($sql_statement)
+                    && !defined($directive->{order_none})
                     # multiline match
                     && ($sql_statement =~ m/select.*order.*by/is))
                 {

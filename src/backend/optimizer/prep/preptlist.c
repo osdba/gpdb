@@ -13,11 +13,12 @@
  *
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/prep/preptlist.c,v 1.88 2008/01/01 19:45:50 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/prep/preptlist.c,v 1.92 2008/10/21 20:42:53 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -42,9 +43,8 @@
 
 static List *expand_targetlist(List *tlist, int command_type,
 				  Index result_relation, List *range_table);
-static List *supplement_simply_updatable_targetlist(DeclareCursorStmt *stmt,
-													 List *range_table,
-													 List *tlist);
+static List *supplement_simply_updatable_targetlist(List *range_table,
+													List *tlist);
 
 
 /*
@@ -141,15 +141,8 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 	} 
 
 	/* simply updatable cursors */
-	if (command_type == CMD_SELECT && 
-		parse->utilityStmt &&
-		IsA(parse->utilityStmt, DeclareCursorStmt) &&
-		((DeclareCursorStmt *) parse->utilityStmt)->is_simply_updatable)
-	{
-		tlist = supplement_simply_updatable_targetlist((DeclareCursorStmt *) parse->utilityStmt, 
-													   range_table,
-													   tlist);
-	}
+	if (root->glob->simplyUpdatable)
+		tlist = supplement_simply_updatable_targetlist(range_table, tlist);
 
 	/*
 	 * Add TID targets for rels selected FOR UPDATE/SHARE.	The executor uses
@@ -225,13 +218,14 @@ preprocess_targetlist(PlannerInfo *root, List *tlist)
 		List	   *vars;
 		ListCell   *l;
 
-		vars = pull_var_clause((Node *) parse->returningList, false);
+		vars = pull_var_clause((Node *) parse->returningList, true);
 		foreach(l, vars)
 		{
 			Var		   *var = (Var *) lfirst(l);
 			TargetEntry *tle;
 
-			if (var->varno == result_relation)
+			if (IsA(var, Var) &&
+					var->varno == result_relation)
 				continue;		/* don't need it */
 
 			if (tlist_member((Node *) var, tlist))
@@ -442,9 +436,8 @@ expand_targetlist(List *tlist, int command_type,
  * available in the tuple itself.
  */
 static List *
-supplement_simply_updatable_targetlist(DeclareCursorStmt *stmt, List *range_table, List *tlist) 
+supplement_simply_updatable_targetlist(List *range_table, List *tlist)
 {
-	Assert(stmt->is_simply_updatable);
 	Index varno = extractSimplyUpdatableRTEIndex(range_table);
 
 	/* ctid */

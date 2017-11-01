@@ -5,10 +5,11 @@
  *
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/utils/builtins.h,v 1.336 2009/08/01 19:59:41 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/utils/builtins.h,v 1.312 2008/04/04 18:45:36 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -614,9 +615,9 @@ extern char *deparse_expression(Node *expr, List *dpcontext,
 extern char *deparse_expr_sweet(Node *expr, List *dpcontext,
 				   bool forceprefix, bool showimplicit);                /*CDB*/
 extern List *deparse_context_for(const char *aliasname, Oid relid);
-extern List *deparse_context_for_plan(Node *outer_plan, Node *inner_plan,
-						 List *rtable);
 extern const char *quote_literal_internal(const char *literal);
+extern List *deparse_context_for_plan(Node *plan, Node *outer_plan,
+						 List *rtable, List *subplans);
 extern const char *quote_identifier(const char *ident);
 extern char *quote_qualified_identifier(const char *qualifier,
 						   const char *ident);
@@ -918,6 +919,7 @@ extern Datum numeric_add(PG_FUNCTION_ARGS);
 extern Datum numeric_sub(PG_FUNCTION_ARGS);
 extern Datum numeric_mul(PG_FUNCTION_ARGS);
 extern Datum numeric_div(PG_FUNCTION_ARGS);
+extern Datum numeric_div_trunc(PG_FUNCTION_ARGS);
 extern Datum numeric_mod(PG_FUNCTION_ARGS);
 extern Datum numeric_inc(PG_FUNCTION_ARGS);
 extern Datum numeric_dec(PG_FUNCTION_ARGS);
@@ -987,6 +989,8 @@ extern Datum numeric_demalg(PG_FUNCTION_ARGS); /* MPP */
 extern Datum int8_avg_demalg(PG_FUNCTION_ARGS); /* MPP */
 extern Datum float8_avg_demalg(PG_FUNCTION_ARGS); /* MPP */
 extern Datum numeric_avg_demalg(PG_FUNCTION_ARGS); /* MPP */
+
+/* complex_type.c */
 extern Datum complex_cmp(PG_FUNCTION_ARGS);
 extern Datum complex_lt(PG_FUNCTION_ARGS);
 extern Datum complex_gt(PG_FUNCTION_ARGS);
@@ -1094,9 +1098,6 @@ extern Datum pg_prepared_statement(PG_FUNCTION_ARGS);
 /* utils/mmgr/portalmem.c */
 extern Datum pg_cursor(PG_FUNCTION_ARGS);
 
-/* tqual.c */
-extern Datum mpp_global_xid_map(PG_FUNCTION_ARGS);
-
 /* utils/resscheduler/resqueue.c */
 extern Datum pg_resqueue_status(PG_FUNCTION_ARGS);
 extern Datum pg_resqueue_status_kv(PG_FUNCTION_ARGS);
@@ -1112,7 +1113,6 @@ extern Datum matrix_add(PG_FUNCTION_ARGS);
 Datum int4_pivot_accum(PG_FUNCTION_ARGS);
 Datum int8_pivot_accum(PG_FUNCTION_ARGS);
 Datum float8_pivot_accum(PG_FUNCTION_ARGS);
-Datum unnest(PG_FUNCTION_ARGS);
 
 /* cdb/cdbpersistentbuild.c */
 Datum gp_persistent_build_db(PG_FUNCTION_ARGS);
@@ -1135,6 +1135,7 @@ extern Datum gp_add_master_standby(PG_FUNCTION_ARGS);
 extern Datum gp_remove_master_standby(PG_FUNCTION_ARGS);
 extern Datum gp_activate_standby(PG_FUNCTION_ARGS);
 
+extern Datum gp_add_segment_primary(PG_FUNCTION_ARGS);
 extern Datum gp_add_segment_mirror(PG_FUNCTION_ARGS);
 extern Datum gp_remove_segment_mirror(PG_FUNCTION_ARGS);
 extern Datum gp_add_segment(PG_FUNCTION_ARGS);
@@ -1144,6 +1145,8 @@ extern Datum gp_prep_new_segment(PG_FUNCTION_ARGS);
 
 extern Datum gp_add_segment_persistent_entries(PG_FUNCTION_ARGS);
 extern Datum gp_remove_segment_persistent_entries(PG_FUNCTION_ARGS);
+
+extern Datum gp_request_fts_probe_scan(PG_FUNCTION_ARGS);
 
 /* utils/gp/persistentutil.c */
 extern Datum gp_add_persistent_filespace_node_entry(PG_FUNCTION_ARGS);
@@ -1208,7 +1211,7 @@ extern Datum test_quicklz_compression(PG_FUNCTION_ARGS);
 extern Datum percentile_cont_trans(PG_FUNCTION_ARGS);
 extern Datum percentile_disc_trans(PG_FUNCTION_ARGS);
 
-/* gp_partition_funtions.c */
+/* gp_partition_functions.c */
 extern void dumpDynamicTableScanPidIndex(EState *estate, int index);
 
 /* XForms */

@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/utils/selfuncs.h,v 1.43 2008/01/01 19:45:59 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/utils/selfuncs.h,v 1.45 2008/08/14 18:48:00 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -115,7 +115,8 @@ extern double mcv_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 				double *sumcommonp);
 extern double histogram_selectivity(VariableStatData *vardata, FmgrInfo *opproc,
 					  Datum constval, bool varonleft,
-					  int min_hist_size, int n_skip);
+					  int min_hist_size, int n_skip,
+					  int *hist_size);
 extern double convert_timevalue_to_scalar(Datum value, Oid typid);
 
 extern Pattern_Prefix_Status pattern_fixed_prefix(Const *patt,
@@ -151,17 +152,19 @@ extern Datum nlikejoinsel(PG_FUNCTION_ARGS);
 extern Datum icnlikejoinsel(PG_FUNCTION_ARGS);
 
 extern Selectivity booltestsel(PlannerInfo *root, BoolTestType booltesttype,
-			Node *arg, int varRelid, JoinType jointype);
+			Node *arg, int varRelid,
+			JoinType jointype, SpecialJoinInfo *sjinfo);
 extern Selectivity nulltestsel(PlannerInfo *root, NullTestType nulltesttype,
-			Node *arg, int varRelid, JoinType jointype);
+			Node *arg, int varRelid,
+			JoinType jointype, SpecialJoinInfo *sjinfo);
 extern Selectivity scalararraysel(PlannerInfo *root,
 			   ScalarArrayOpExpr *clause,
 			   bool is_join_clause,
-			   int varRelid, JoinType jointype);
+			   int varRelid, JoinType jointype, SpecialJoinInfo *sjinfo);
 extern int	estimate_array_length(Node *arrayexpr);
 extern Selectivity rowcomparesel(PlannerInfo *root,
 			  RowCompareExpr *clause,
-			  int varRelid, JoinType jointype);
+			  int varRelid, JoinType jointype, SpecialJoinInfo *sjinfo);
 
 extern void mergejoinscansel(PlannerInfo *root, Node *clause,
 				 Oid opfamily, int strategy, bool nulls_first,

@@ -5,6 +5,7 @@
  *	  functions.
  *
  * Portions Copyright (c) 2013, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -75,7 +76,8 @@ typedef enum MemoryOwnerType
 	MEMORY_OWNER_TYPE_Rollover,
 	MEMORY_OWNER_TYPE_MemAccount,
 	MEMORY_OWNER_TYPE_Exec_AlienShared,
-	MEMORY_OWNER_TYPE_END_LONG_LIVING = MEMORY_OWNER_TYPE_Exec_AlienShared,
+	MEMORY_OWNER_TYPE_Exec_RelinquishedPool,
+	MEMORY_OWNER_TYPE_END_LONG_LIVING = MEMORY_OWNER_TYPE_Exec_RelinquishedPool,
 	/* End of long-living accounts */
 
 	/* Short-living accounts */
@@ -84,6 +86,7 @@ typedef enum MemoryOwnerType
 	MEMORY_OWNER_TYPE_MainEntry,
 	MEMORY_OWNER_TYPE_Parser,
 	MEMORY_OWNER_TYPE_Planner,
+	MEMORY_OWNER_TYPE_PlannerHook,
 	MEMORY_OWNER_TYPE_Optimizer,
 	MEMORY_OWNER_TYPE_Dispatcher,
 	MEMORY_OWNER_TYPE_Serializer,
@@ -124,7 +127,7 @@ typedef enum MemoryOwnerType
 	MEMORY_OWNER_TYPE_Exec_Limit,
 	MEMORY_OWNER_TYPE_Exec_Motion,
 	MEMORY_OWNER_TYPE_Exec_ShareInputScan,
-	MEMORY_OWNER_TYPE_Exec_Window,
+	MEMORY_OWNER_TYPE_Exec_WindowAgg,
 	MEMORY_OWNER_TYPE_Exec_Repeat,
 	MEMORY_OWNER_TYPE_Exec_DML,
 	MEMORY_OWNER_TYPE_Exec_SplitUpdate,
@@ -132,7 +135,10 @@ typedef enum MemoryOwnerType
 	MEMORY_OWNER_TYPE_Exec_AssertOp,
 	MEMORY_OWNER_TYPE_Exec_BitmapTableScan,
 	MEMORY_OWNER_TYPE_Exec_PartitionSelector,
-	MEMORY_OWNER_TYPE_EXECUTOR_END = MEMORY_OWNER_TYPE_Exec_PartitionSelector,
+	MEMORY_OWNER_TYPE_Exec_RecursiveUnion,
+	MEMORY_OWNER_TYPE_Exec_CteScan,
+	MEMORY_OWNER_TYPE_Exec_WorkTableScan,
+	MEMORY_OWNER_TYPE_EXECUTOR_END = MEMORY_OWNER_TYPE_Exec_WorkTableScan,
 	MEMORY_OWNER_TYPE_END_SHORT_LIVING = MEMORY_OWNER_TYPE_EXECUTOR_END
 } MemoryOwnerType;
 
@@ -228,5 +234,13 @@ MemoryAccounting_SaveToLog(void);
 extern void
 MemoryAccounting_PrettyPrint(void);
 
+extern uint64
+MemoryAccounting_DeclareDone(void);
+
+extern uint64
+MemoryAccounting_RequestQuotaIncrease(void);
+
+extern void
+MemoryAccounting_ExplainAppendCurrentOptimizerAccountInfo(StringInfoData *str);
 
 #endif   /* MEMACCOUNTING_H */

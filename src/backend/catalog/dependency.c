@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/catalog/dependency.c,v 1.81 2008/10/04 21:56:52 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/catalog/dependency.c,v 1.71 2008/03/27 03:57:33 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -32,6 +32,7 @@
 #include "catalog/pg_compression.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_conversion.h"
+#include "catalog/pg_conversion_fn.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_extprotocol.h"
@@ -66,13 +67,14 @@
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "miscadmin.h"
-#include "optimizer/clauses.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteRemove.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 #include "cdb/cdbvars.h"
 
@@ -1439,15 +1441,15 @@ find_expr_references_walker(Node *node,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
-	if (IsA(node, WindowRef))
+	if (IsA(node, WindowFunc))
 	{
-		WindowRef	*windowref = (WindowRef *) node;
+		WindowFunc *wfunc = (WindowFunc *) node;
 
-		add_object_address(OCLASS_PROC, windowref->winfnoid, 0,
+		add_object_address(OCLASS_PROC, wfunc->winfnoid, 0,
 						   context->addrs);
 		/* fall through to examine arguments */
 	}
-	if (is_subplan(node))
+	if (IsA(node, SubPlan))
 	{
 		/* Extra work needed here if we ever need this case */
 		elog(ERROR, "already-planned subqueries not supported");

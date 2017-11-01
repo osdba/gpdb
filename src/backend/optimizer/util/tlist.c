@@ -4,23 +4,23 @@
  *	  Target list manipulation routines
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/util/tlist.c,v 1.78 2008/01/01 19:45:50 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/util/tlist.c,v 1.83 2008/10/21 20:42:53 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "nodes/makefuncs.h"
-#include "optimizer/clauses.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/planmain.h"
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
-#include "parser/parse_expr.h"
 #include "utils/lsyscache.h"
 
 typedef struct maxSortGroupRef_context
@@ -133,7 +133,7 @@ tlist_member_ignore_relabel(Node *node, List *targetlist)
 List *
 flatten_tlist(List *tlist)
 {
-	List	   *vlist = pull_var_clause((Node *) tlist, false);
+	List	   *vlist = pull_var_clause((Node *) tlist, true);
 	List	   *new_tlist;
 
 	new_tlist = add_to_flat_tlist(NIL, vlist, false /* resjunk */);
@@ -143,28 +143,28 @@ flatten_tlist(List *tlist)
 
 /*
  * add_to_flat_tlist
- *		Add more expressions to a flattened tlist (if they're not already in it)
+ *		Add more vars to a flattened tlist (if they're not already in it)
  *
  * 'tlist' is the flattened tlist
- * 'exprs' is a list of expression nodes
+ * 'vars' is a list of Var and/or PlaceHolderVar nodes
  *
  * Returns the extended tlist.
  */
 List *
-add_to_flat_tlist(List *tlist, List *exprs, bool resjunk)
+add_to_flat_tlist(List *tlist, List *vars, bool resjunk)
 {
 	int			next_resno = list_length(tlist) + 1;
 	ListCell   *v;
 
-	foreach(v, exprs)
+	foreach(v, vars)
 	{
-		Node	   *expr = (Node *) lfirst(v);
+		Node	   *var = (Node *) lfirst(v);
 
-		if (!tlist_member_ignore_relabel(expr, tlist))
+		if (!tlist_member_ignore_relabel(var, tlist))
 		{
 			TargetEntry *tle;
 
-			tle = makeTargetEntry(copyObject(expr),		/* copy needed?? */
+			tle = makeTargetEntry(copyObject(var),		/* copy needed?? */
 								  next_resno++,
 								  NULL,
 								  resjunk);

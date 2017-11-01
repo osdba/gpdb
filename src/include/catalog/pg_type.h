@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/catalog/pg_type.h,v 1.191.2.1 2009/02/24 01:38:49 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/catalog/pg_type.h,v 1.193 2008/03/27 03:57:34 tgl Exp $
  *
  * NOTES
  *	  the genbki.sh script reads this file and generates .bki
@@ -20,7 +20,6 @@
 #define PG_TYPE_H
 
 #include "catalog/genbki.h"
-#include "nodes/nodes.h"
 
 /* ----------------
  *		pg_type definition.  cpp turns this into
@@ -32,7 +31,6 @@
  *		See struct FormData_pg_attribute for details.
  * ----------------
  */
-
 #define TypeRelationId	1247
 
 CATALOG(pg_type,1247) BKI_BOOTSTRAP
@@ -371,7 +369,7 @@ DESCR("double-precision floating point complex number, 16-byte storage");
 #define COMPLEXOID 195
 DATA(insert OID = 196 (	_complex	   PGNSP PGUID -1 f b t \054 0 195 0 array_in array_out array_recv array_send - - - d x f 0 -1 0 _null_ _null_ ));
 
-/*  OIDS 200 - 299  */
+/* OIDS 200 - 299 */
 
 DATA(insert OID = 210 (  smgr	   PGNSP PGUID 2 t b t \054 0 0 0 smgrin smgrout - - - - - s p f 0 -1 0 _null_ _null_ ));
 DESCR("storage manager");
@@ -403,6 +401,7 @@ DATA(insert OID = 628 (  line	   PGNSP PGUID 32 f b t \054 0 701 629 line_in lin
 DESCR("geometric line (not implemented)");
 #define LINEOID			628
 DATA(insert OID = 629 (  _line	   PGNSP PGUID	-1 f b t \054 0 628 0 array_in array_out array_recv array_send - - - d x f 0 -1 0 _null_ _null_ ));
+DESCR("");
 
 /* OIDS 700 - 799 */
 
@@ -491,6 +490,7 @@ DATA(insert OID = 1041 (  _inet		 PGNSP PGUID -1 f b t \054 0  869 0 array_in ar
 DATA(insert OID = 651  (  _cidr		 PGNSP PGUID -1 f b t \054 0  650 0 array_in array_out array_recv array_send - - - i x f 0 -1 0 _null_ _null_ ));
 DATA(insert OID = 1263 (  _cstring	 PGNSP PGUID -1 f b t \054 0 2275 0 array_in array_out array_recv array_send - - - i x f 0 -1 0 _null_ _null_ ));
 #define CSTRINGARRAYOID		1263
+
 DATA(insert OID = 1042 ( bpchar		 PGNSP PGUID -1 f b t \054 0	0 1014 bpcharin bpcharout bpcharrecv bpcharsend bpchartypmodin bpchartypmodout - i x f 0 -1 0 _null_ _null_ ));
 DESCR("char(length), blank-padded string, fixed storage length");
 #define BPCHAROID		1042
@@ -696,25 +696,25 @@ DATA(insert OID = 6994 (gp_relation_node PGNSP PGUID -1 f c t \054 5094 0 0 reco
 #define  TYPTYPE_ENUM		'e' /* enumerated type */
 #define  TYPTYPE_PSEUDO		'p' /* pseudo-type */
 
-/* 
+/*
  * typcategory is from Postgres 9.0 catalog changes.
  * Used only (so far) for JSON functions
  */
-# define  TYPCATEGORY_INVALID			'\0'	/* not an allowed category */
-# define  TYPCATEGORY_ARRAY				'A'
-# define  TYPCATEGORY_BOOLEAN			'B'
-# define  TYPCATEGORY_COMPOSITE			'C'
-# define  TYPCATEGORY_DATETIME			'D'
-# define  TYPCATEGORY_ENUM				'E'
-# define  TYPCATEGORY_GEOMETRIC			'G'
-# define  TYPCATEGORY_NETWORK			'I'		/* think INET */
-# define  TYPCATEGORY_NUMERIC			'N'
-# define  TYPCATEGORY_PSEUDOTYPE		'P'
-# define  TYPCATEGORY_STRING			'S'
-# define  TYPCATEGORY_TIMESPAN			'T'
-# define  TYPCATEGORY_USER				'U'
-# define  TYPCATEGORY_BITSTRING			'V'		/* er ... "varbit"? */
-# define  TYPCATEGORY_UNKNOWN			'X'
+#define  TYPCATEGORY_INVALID	'\0'	/* not an allowed category */
+#define  TYPCATEGORY_ARRAY		'A'
+#define  TYPCATEGORY_BOOLEAN	'B'
+#define  TYPCATEGORY_COMPOSITE	'C'
+#define  TYPCATEGORY_DATETIME	'D'
+#define  TYPCATEGORY_ENUM		'E'
+#define  TYPCATEGORY_GEOMETRIC	'G'
+#define  TYPCATEGORY_NETWORK	'I'		/* think INET */
+#define  TYPCATEGORY_NUMERIC	'N'
+#define  TYPCATEGORY_PSEUDOTYPE 'P'
+#define  TYPCATEGORY_STRING		'S'
+#define  TYPCATEGORY_TIMESPAN	'T'
+#define  TYPCATEGORY_USER		'U'
+#define  TYPCATEGORY_BITSTRING	'V'		/* er ... "varbit"? */
+#define  TYPCATEGORY_UNKNOWN	'X'
 
 /* Is a type OID a polymorphic pseudotype?	(Beware of multiple evaluation) */
 #define IsPolymorphicType(typid)  \
@@ -726,100 +726,5 @@ DATA(insert OID = 6994 (gp_relation_node PGNSP PGUID -1 f c t \054 5094 0 0 reco
 /* Is a type OID suitable for describe callback functions? */
 #define TypeSupportsDescribe(typid)  \
 	((typid) == RECORDOID)
-
-#ifndef FRONTEND /* don't export these to the front end */
-
-/*
- * prototypes for functions in pg_type.c
- */
-extern Oid TypeShellMake(const char *typeName, Oid typeNamespace, Oid ownerId);
-
-extern Oid TypeCreate(Oid newTypeOid,
-		   const char *typeName,
-		   Oid typeNamespace,
-		   Oid relationOid,
-		   char relationKind,
-		   Oid ownerId,
-		   int16 internalSize,
-		   char typeType,
-		   char typDelim,
-		   Oid inputProcedure,
-		   Oid outputProcedure,
-		   Oid receiveProcedure,
-		   Oid sendProcedure,
-		   Oid typmodinProcedure,
-		   Oid typmodoutProcedure,
-		   Oid analyzeProcedure,
-		   Oid elementType,
-		   bool isImplicitArray,
-		   Oid arrayType,
-		   Oid baseType,
-		   const char *defaultTypeValue,
-		   char *defaultTypeBin,
-		   bool passedByValue,
-		   char alignment,
-		   char storage,
-		   int32 typeMod,
-		   int32 typNDims,
-		   bool typeNotNull);
-
-extern Oid TypeCreateWithOptions(Oid newtypeOid,
-		   const char *typeName,
-		   Oid typeNamespace,
-		   Oid relationOid,
-		   char relationKind,
-		   Oid ownerId,
-		   int16 internalSize,
-		   char typeType,
-		   char typDelim,
-		   Oid inputProcedure,
-		   Oid outputProcedure,
-		   Oid receiveProcedure,
-		   Oid sendProcedure,
-		   Oid typmodinProcedure,
-		   Oid typmodoutProcedure,
-		   Oid analyzeProcedure,
-		   Oid elementType,
-		   bool isImplicitArray,
-		   Oid arrayType,
-		   Oid baseType,
-		   const char *defaultTypeValue,
-		   char *defaultTypeBin,
-		   bool passedByValue,
-		   char alignment,
-		   char storage,
-		   int32 typeMod,
-		   int32 typNDims,
-		   bool typeNotNull,
-		   Datum typoptions);
-
-extern void GenerateTypeDependencies(Oid typeNamespace,
-						 Oid typeObjectId,
-						 Oid relationOid,
-						 char relationKind,
-						 Oid owner,
-						 Oid inputProcedure,
-						 Oid outputProcedure,
-						 Oid receiveProcedure,
-						 Oid sendProcedure,
-						 Oid typmodinProcedure,
-						 Oid typmodoutProcedure,
-						 Oid analyzeProcedure,
-						 Oid elementType,
-						 bool isImplicitArray,
-						 Oid baseType,
-						 Node *defaultExpr,
-						 bool rebuild);
-
-extern void TypeRename(Oid typeOid, const char *newTypeName,
-		   Oid typeNamespace);
-
-extern bool moveArrayTypeName(Oid typeOid, const char *typeName,
-				  Oid typeNamespace);
-
-extern char *makeArrayTypeName(const char *typeName, Oid typeNamespace);
-extern void add_type_encoding(Oid typid, Datum typoptions);
-
-#endif /* !FRONTEND */
 
 #endif   /* PG_TYPE_H */

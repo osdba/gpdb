@@ -14,6 +14,7 @@ import platform
 import shutil
 import socket
 import tarfile
+import tempfile
 import thread
 import json
 import csv
@@ -2641,6 +2642,50 @@ def delete_data_dir(host):
     cmd.run(validateAfter=True)
 
 
+@when('the user initializes a standby on the same host as master')
+def impl(context):
+    hostname = get_master_hostname('template1')[0][0]
+    port_guaranteed_open = get_open_port()
+    temp_data_dir = tempfile.mkdtemp() + "/standby_datadir"
+    cmd = "gpinitstandby -a -s %s -P %d -F pg_system:%s" % (hostname, port_guaranteed_open, temp_data_dir)
+    run_gpcommand(context, cmd)
+    context.standby_data_dir = temp_data_dir
+    context.standby_was_initialized = True
+
+
+# from https://stackoverflow.com/questions/2838244/get-open-tcp-port-in-python/2838309#2838309
+def get_open_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("",0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+@given('"{path}" has its permissions set to "{perm}"')
+def impl(context, path, perm):
+    path = os.path.expandvars(path)
+    if not os.path.exists(path):
+        raise Exception('Path does not exist! "%s"' % path)
+    old_permissions = os.stat(path).st_mode  # keep it as a number that has a meaningful representation in octal
+    test_permissions = int(perm, 8)          # accept string input with octal semantics and convert to a raw number
+    os.chmod(path, test_permissions)
+    context.path_for_which_to_restore_the_permissions = path
+    context.permissions_to_restore_path_to = old_permissions
+
+
+@then('rely on environment.py to restore path permissions')
+def impl(context):
+    print "go look in environment.py to see how it uses the path and permissions on context to make sure it's cleaned up"
+
+
+@when('the user runs pg_controldata against the standby data directory')
+def impl(context):
+    cmd = "pg_controldata " + context.standby_data_dir
+    run_gpcommand(context, cmd)
+
+
 @when('the user initializes standby master on "{hostname}"')
 def impl(context, hostname):
     create_standby(context, hostname)
@@ -2784,20 +2829,6 @@ def impl(context, filename_prefix):
                       ctxt=REMOTE,
                       remoteHost=host)
         cmd.run(validateAfter=True)
-
-
-@then('the standby is initialized if required')
-def impl(context):
-    if context.standby_was_initialized or hasattr(context, 'cluster_had_standby'):
-        if get_standby_host():
-            return
-        delete_data_dir(context.standby_host)
-        cmd = Command('create the standby', cmdStr='gpinitstandby -s %s -a' % context.standby_host)
-        cmd.run(validateAfter=True)
-    else:
-        standby = get_standby_host()
-        if standby:
-            run_gpcommand(context, 'gpinitstandby -ra')
 
 
 @given('user can start transactions')
@@ -3179,11 +3210,11 @@ def impl(context, directory, prefix):
     results = cmd.get_stdout().split('\n')
 
     if len(results) == 0:
-        raise Exception('Failed to find dump files %s on the master under %s' % (results, master_dump_dir))
+        raise Exception('Failed to find dump files %s on the master under %s' % (results, dump_dir))
     for filename in results:
         if not os.path.basename(filename).startswith(prefix.strip()):
             raise Exception('Dump file %s on master under %s does not have required prefix %s' % (
-            filename, master_dump_dir, prefix))
+            filename, dump_dir, prefix))
 
 
 @given('the environment variable "{var}" is not set')
@@ -3271,6 +3302,7 @@ def impl(context, dbname):
 
 
 @when('sql "{sql}" is executed in "{dbname}" db')
+@then('sql "{sql}" is executed in "{dbname}" db')
 def impl(context, sql, dbname):
     execute_sql(dbname, sql)
 
@@ -3854,6 +3886,7 @@ def impl(context, seg):
 def impl(context, to_file):
     write_lines = []
     BLDWRAP_TOP = os.environ.get('BLDWRAP_TOP')
+    # this file is the output of the pulse system, where gpinit has been run
     from_file = BLDWRAP_TOP + '/sys_mgmt_test/test/general/cluster_conf.out'
     with open(from_file) as fr:
         lines = fr.readlines()
@@ -4027,15 +4060,6 @@ def impl(context):
         run_gpcommand(context, 'gpinitstandby -ra')
 
 
-@given('"{path}" has "{perm}" permissions')
-@then('"{path}" has "{perm}" permissions')
-def impl(context, path, perm):
-    path = os.path.expandvars(path)
-    if not os.path.exists(path):
-        raise Exception('Path does not exist! "%s"' % path)
-    os.chmod(path, int(perm, 8))
-
-
 @when('user can "{can_ssh}" ssh locally on standby')
 @then('user can "{can_ssh}" ssh locally on standby')
 def impl(context, can_ssh):
@@ -4164,12 +4188,12 @@ def impl(context, tablename, dbconn):
 @then('verify that gptransfer has a sub batch size of "{num}"')
 def impl(context, num):
     num = int(num)
-    logdir = "%s/gpAdminLogs" % os.path.expanduser("~")
-    if not os.path.exists(logdir):
-        raise Exception('No such directory: %s' % logdir)
-    logname = get_log_name('gptransfer', logdir)
+    log_dir = _get_gpAdminLogs_directory()
+    if not os.path.exists(log_dir):
+        raise Exception('No such directory: %s' % log_dir)
+    log_name = get_log_name('gptransfer', log_dir)
 
-    full_path = os.path.join(logdir, logname)
+    full_path = os.path.join(log_dir, log_name)
 
     if not os.path.isfile(full_path):
         raise Exception("Can not find file: %s" % full_path)
@@ -4192,17 +4216,14 @@ def impl(context, num):
         raise Exception("gptransfer sub batch size should be %d, is at least %d" % (num, num + 1))
 
 
-# Read in a full map file, remove the first host, print it to a new file
+def _get_gpAdminLogs_directory():
+    return "%s/gpAdminLogs" % os.path.expanduser("~")
+
+
 @given('an incomplete map file is created')
 def impl(context):
-    map_file = os.environ['GPTRANSFER_MAP_FILE']
-    contents = []
-    with open(map_file, 'r') as fd:
-        contents = fd.readlines()
-
     with open('/tmp/incomplete_map_file', 'w') as fd:
-        for line in contents[1:]:
-            fd.write(line)
+        fd.write('nonexistent_host,nonexistent_host')
 
 
 @given(
@@ -4941,16 +4962,15 @@ def impl(context):
                               And wait until the process "gpsmon" is up
                               ''')
 
+
 @given('the setting "{variable_name}" is NOT set in the configuration file "{path_to_file}"')
 @when('the setting "{variable_name}" is NOT set in the configuration file "{path_to_file}"')
 def impl(context, variable_name, path_to_file):
     path = os.path.join(os.getenv("MASTER_DATA_DIRECTORY"), path_to_file)
-    match_start_of_line = '^' + variable_name + '.*'
-    pattern = re.compile(match_start_of_line)
-    with open(path, 'r') as f:
-        for line in f.read().split('\n'):
-            if pattern.match(line):
-                raise Exception('found in file %s the setting: %s' % (line, variable_name))
+    output_file = "/tmp/gpperfmon_temp_config"
+    cmd = Command("sed to remove line", "sed '/^%s/,+1 d' < %s > %s" % (variable_name, path, output_file))
+    cmd.run(validateAfter=True)
+    shutil.move(output_file, path)
 
 
 @given('the setting "{setting_string}" is placed in the configuration file "{path_to_file}"')
@@ -4960,6 +4980,7 @@ def impl(context, setting_string, path_to_file):
     with open(path, 'a') as f:
         f.write(setting_string)
         f.write("\n")
+
 
 @given('the latest gpperfmon gpdb-alert log is copied to a file with a fake (earlier) timestamp')
 @when('the latest gpperfmon gpdb-alert log is copied to a file with a fake (earlier) timestamp')
@@ -5046,9 +5067,9 @@ def ddboost_config_setup(context, storage_unit=None):
 
     cmd_config
     local = pexpect.spawn(cmd_config)
-    local.expect('Password: ')
+    local.expect('Password: ', timeout=60)
     local.sendline(context._root['local_ddboost_password'])
-    local.expect(pexpect.EOF)
+    local.expect(pexpect.EOF, timeout=60)
     local.close()
 
     cmd_config = "gpcrondump --ddboost-host %s --ddboost-user %s --ddboost-backupdir %s --ddboost-remote" % \
@@ -5061,9 +5082,9 @@ def ddboost_config_setup(context, storage_unit=None):
 
     cmd_config
     local = pexpect.spawn(cmd_config)
-    local.expect('Password: ')
+    local.expect('Password: ', timeout=60)
     local.sendline(context._root['remote_ddboost_password'])
-    local.expect(pexpect.EOF)
+    local.expect(pexpect.EOF, timeout=60)
     local.close()
 
 def _copy_nbu_lib_files(context, ver, gphome):
@@ -5114,16 +5135,15 @@ def impl(context, ver):
 @given('the test suite is initialized for DDBoost')
 def impl(context):
     os.environ["DDBOOST"] = "TRUE"
-    DDBOOSTDICT = defaultdict(dict)
-    DDBOOSTDICT['DDBOOSTINFO'] = parse_config_params()
-    context._root['local_ddboost_host'] = DDBOOSTDICT['DDBOOSTINFO']['DDBOOST_HOST_1']
-    context._root['local_ddboost_user'] = DDBOOSTDICT['DDBOOSTINFO']['DDBOOST_USER_1']
-    context._root['local_ddboost_password'] = DDBOOSTDICT['DDBOOSTINFO']['DDBOOST_PASSWORD_1']
-    context._root['remote_ddboost_host'] = DDBOOSTDICT['DDBOOSTINFO']['DDBOOST_HOST_2']
-    context._root['remote_ddboost_user'] = DDBOOSTDICT['DDBOOSTINFO']['DDBOOST_USER_2']
-    context._root['remote_ddboost_password'] = DDBOOSTDICT['DDBOOSTINFO']['DDBOOST_PASSWORD_2']
+    context._root['local_ddboost_host'] = os.environ["DD_SOURCE_HOST"]
+    context._root['local_ddboost_user'] = os.environ["DD_USER"]
+    context._root['local_ddboost_password'] = os.environ["DD_PASSWORD"]
+    context._root['remote_ddboost_host'] = os.environ["DD_DEST_HOST"]
+    context._root['remote_ddboost_user'] = os.environ["DD_USER"]
+    context._root['remote_ddboost_password'] = os.environ["DD_PASSWORD"]
     if 'ddboost_backupdir' not in context._root:
-        directory = os.getenv('PULSE_PROJECT', default='GPDB') + os.getenv('PULSE_BUILD_VERSION', default='') + os.getenv('PULSE_STAGE', default='') + '_DIR'
+        with open("/tmp/terraform_name", 'r') as tf_name_file:
+            directory = "GPDB-" + tf_name_file.readline() + "-DIR"
         context._root['ddboost_backupdir'] = directory
     ddboost_config_setup(context, storage_unit="GPDB")
 
@@ -5194,6 +5214,7 @@ def impl(context, gppkg_name):
         if not gppkg_name in cmd.get_stdout():
             raise Exception( '"%s" gppkg is not installed on host: %s. \nInstalled packages: %s' % (gppkg_name, hostname, cmd.get_stdout()))
 
+
 @given('"{gppkg_name}" gppkg files do not exist on any hosts')
 @when('"{gppkg_name}" gppkg files do not exist on any hosts')
 @then('"{gppkg_name}" gppkg files do not exist on any hosts')
@@ -5213,6 +5234,7 @@ def impl(context, gppkg_name):
 
         if gppkg_name in cmd.get_stdout():
             raise Exception( '"%s" gppkg is installed on host: %s. \nInstalled packages: %s' % (gppkg_name, hostname, cmd.get_stdout()))
+
 
 def _remove_gppkg_from_host(context, gppkg_name, is_master_host):
     remote_gphome = os.environ.get('GPHOME')
@@ -5257,10 +5279,40 @@ def _remove_gppkg_from_host(context, gppkg_name, is_master_host):
                   remoteHost=hostname)
     cmd.run(validateAfter=True)
 
+
 @when('gppkg "{gppkg_name}" is removed from a segment host')
 def impl(context, gppkg_name):
     _remove_gppkg_from_host(context, gppkg_name, is_master_host=False)
 
+
 @when('gppkg "{gppkg_name}" is removed from master host')
 def impl(context, gppkg_name):
     _remove_gppkg_from_host(context, gppkg_name, is_master_host=True)
+
+
+@given('gpAdminLogs directory has no "{prefix}" files')
+def impl(context, prefix):
+    log_dir = _get_gpAdminLogs_directory()
+    items = glob.glob('%s/%s_*.log' % (log_dir, prefix))
+    for item in items:
+        os.remove(item)
+
+
+@given('"{filepath}" is copied to the install directory')
+def impl(context, filepath):
+    gphome = os.getenv("GPHOME")
+    if not gphome:
+        raise Exception("GPHOME must be set")
+    shutil.copy(filepath, os.path.join(gphome, "bin"))
+
+
+@then('{command} should print "{target}" to logfile')
+def impl(context, command, target):
+    log_dir = _get_gpAdminLogs_directory()
+    filename = glob.glob('%s/%s_*.log' % (log_dir, command))[0]
+    contents = ''
+    with open(filename) as fr:
+        for line in fr:
+            contents += line
+    if target not in contents:
+        raise Exception("cannot find %s in %s" % (target, filename))

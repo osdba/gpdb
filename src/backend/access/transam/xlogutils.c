@@ -9,6 +9,7 @@
  *
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -203,7 +204,7 @@ forget_invalid_pages_db(Oid tblspc, Oid dbid)
 #ifdef USE_SEGWALREP
 /* Forget an invalid AO/AOCO segment file */
 static void
-forget_invalid_segment_file(RelFileNode rnode, int32 segmentFileNum)
+forget_invalid_segment_file(RelFileNode rnode, uint32 segmentFileNum)
 {
 	xl_invalid_page_key key;
 	bool		found;
@@ -357,7 +358,7 @@ XLogReadBuffer(Relation reln, BlockNumber blkno, bool init)
  * relfilenode.
  */
 void
-XLogAOSegmentFile(RelFileNode rnode, int32 segmentFileNum)
+XLogAOSegmentFile(RelFileNode rnode, uint32 segmentFileNum)
 {
 	log_invalid_page(rnode, segmentFileNum, false);
 }
@@ -707,7 +708,7 @@ XLogDropRelation(RelFileNode rnode)
 #ifdef USE_SEGWALREP
 /* Drop an AO/CO segment file from the invalid_page_tab hash table */
 void
-XLogAODropSegmentFile(RelFileNode rnode, int32 segmentFileNum)
+XLogAODropSegmentFile(RelFileNode rnode, uint32 segmentFileNum)
 {
 	forget_invalid_segment_file(rnode, segmentFileNum);
 }

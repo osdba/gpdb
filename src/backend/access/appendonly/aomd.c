@@ -11,8 +11,13 @@
  *	  may need to change if inconsistencies arise.
  *
  * Portions Copyright (c) 2008, Greenplum Inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/access/appendonly/aomd.c
  *
  *-------------------------------------------------------------------------
  */
@@ -195,7 +200,7 @@ CloseAOSegmentFile(MirroredAppendOnlyOpen *mirroredOpen)
  * Truncate all bytes from offset to end of file.
  */
 void
-TruncateAOSegmentFile(MirroredAppendOnlyOpen *mirroredOpen, Relation rel, int64 offset, int elevel)
+TruncateAOSegmentFile(MirroredAppendOnlyOpen *mirroredOpen, Relation rel, int64 offset)
 {
 	int primaryError;
 	bool mirrorDataLossOccurred;	// We'll look at this at close time.
@@ -215,10 +220,12 @@ TruncateAOSegmentFile(MirroredAppendOnlyOpen *mirroredOpen, Relation rel, int64 
 							&primaryError,
 							&mirrorDataLossOccurred);
 	if (primaryError != 0)
-		ereport(elevel,
+		ereport(ERROR,
 				(errmsg("\"%s\": failed to truncate data after eof: %s", 
 					    relname,
 					    strerror(primaryError))));
-	
+#ifdef USE_SEGWALREP
+	if (!rel->rd_istemp)
+		xlog_ao_truncate(mirroredOpen, offset);
+#endif
 }
-

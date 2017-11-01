@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/parser/parse_oper.c,v 1.101.2.1 2010/07/30 17:57:07 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/parser/parse_oper.c,v 1.104 2008/08/25 22:42:33 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -18,8 +18,8 @@
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "lib/stringinfo.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_type.h"
@@ -956,6 +956,7 @@ make_op(ParseState *pstate, List *opname, Node *ltree, Node *rtree,
 
 	/* Do typecasting and build the expression tree */
 	result = make_op_expr(pstate, tup, ltree, rtree, ltypeId, rtypeId);
+	((OpExpr *) result)->location = location;
 
 	ReleaseSysCache(tup);
 

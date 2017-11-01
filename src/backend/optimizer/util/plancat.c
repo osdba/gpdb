@@ -5,12 +5,13 @@
  *
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/util/plancat.c,v 1.152 2008/10/04 21:56:53 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/util/plancat.c,v 1.145 2008/04/01 00:48:33 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -21,27 +22,30 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/transam.h"
-#include "catalog/pg_appendonly_fn.h"
+#include "catalog/catalog.h"
 #include "catalog/pg_inherits.h"
-#include "catalog/pg_exttable.h"
+#include "miscadmin.h"
 #include "commands/tablecmds.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/plancat.h"
 #include "optimizer/predtest.h"
 #include "optimizer/prep.h"
-#include "parser/parse_expr.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
-#include "catalog/catalog.h"
-#include "miscadmin.h"
+#include "utils/tqual.h"
+
 #include "cdb/cdbappendonlyam.h"
 #include "cdb/cdbrelsize.h"
+#include "catalog/pg_appendonly_fn.h"
+#include "catalog/pg_exttable.h"
 
 
 /* GUC parameter */
@@ -374,8 +378,6 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 static void
 get_external_relation_info(Relation relation, RelOptInfo *rel)
 {
-	ExtTableEntry *extentry;
-
 	/*
      * Get partitioning key info for distributed relation.
      */
@@ -384,18 +386,7 @@ get_external_relation_info(Relation relation, RelOptInfo *rel)
 	/*
 	 * Get the pg_exttable fields for this table
 	 */
-	extentry = GetExtTableEntry(RelationGetRelid(relation));
-
-	rel->urilocationlist = extentry->urilocations;
-	rel->execlocationlist = extentry->execlocations;
-	rel->execcommand = extentry->command;
-	rel->fmttype = extentry->fmtcode;
-	rel->fmtopts = extentry->fmtopts;
-	rel->rejectlimit = extentry->rejectlimit;
-	rel->rejectlimittype = extentry->rejectlimittype;
-	rel->fmterrtbl = extentry->fmterrtbl;
-	rel->ext_encoding = extentry->encoding;
-	rel->writable = extentry->iswritable;
+	rel->extEntry = GetExtTableEntry(RelationGetRelid(relation));
 }
 
 /*
@@ -532,38 +523,19 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 			if(RelationIsExternal(rel))
 				break;
 			
-			if(RelationIsAoRows(rel))
+			if (RelationIsAoRows(rel))
 			{
-				/* MPP-7629 */
-				FileSegTotals	*fstotal = GetSegFilesTotals(rel, SnapshotNow);
-				
-				Assert(fstotal);
-				curpages = RelationGuessNumberOfBlocks((double)fstotal->totalbytes);
-				pfree(fstotal);
+				int64		totalbytes;
+
+				totalbytes = GetAOTotalBytes(rel, SnapshotNow);
+				curpages = RelationGuessNumberOfBlocks(totalbytes);
 			}
 			else if (RelationIsAoCols(rel))
 			{
-				/* TODO: largely copied from gp_statistics_estimate_reltuples_relpages_ao_cs
-				 * but there really should be a CO equivalent to GetSegFilesTotals, this is
-				 * a little ugly */
-				
-				int					nsegs, i , j;
-				double				totalBytes = 0;
-				AOCSFileSegInfo**	aocsInfo = GetAllAOCSFileSegInfo(rel, SnapshotNow, &nsegs);
-				
-			    if (aocsInfo)
-			    {
-			    	for(i = 0; i < nsegs; i++)
-			    	{
-			    		for(j = 0; j < RelationGetNumberOfAttributes(rel); j++)
-			    		{
-			    			AOCSVPInfoEntry *e = getAOCSVPEntry(aocsInfo[i], j);
-			    			Assert(e);
-			    			totalBytes += e->eof_uncompressed;
-			    		}
-			    	}
-			    }
-			    curpages = RelationGuessNumberOfBlocks(totalBytes);
+				int64		totalbytes;
+
+				totalbytes = GetAOCSTotalBytes(rel, SnapshotNow, false);
+				curpages = RelationGuessNumberOfBlocks(totalbytes);
 			}
 			else
 			{

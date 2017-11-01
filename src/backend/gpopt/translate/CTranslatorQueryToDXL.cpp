@@ -1329,8 +1329,8 @@ CTranslatorQueryToDXL::PdxlwfLeadLag
 		pdxlnLeadEdge = GPOS_NEW(m_pmp) CDXLNode(m_pmp, GPOS_NEW(m_pmp) CDXLScalarWindowFrameEdge(m_pmp, true /* fLeading */, edxlfbLead));
 		pdxlnTrailEdge = GPOS_NEW(m_pmp) CDXLNode(m_pmp, GPOS_NEW(m_pmp) CDXLScalarWindowFrameEdge(m_pmp, false /* fLeading */, edxlfbTrail));
 
-		pdxlnLeadEdge->AddChild(CTranslatorUtils::PdxlnInt4Const(m_pmp, m_pmda, 1 /*iVal*/));
-		pdxlnTrailEdge->AddChild(CTranslatorUtils::PdxlnInt4Const(m_pmp, m_pmda, 1 /*iVal*/));
+		pdxlnLeadEdge->AddChild(CTranslatorUtils::PdxlnInt8Const(m_pmp, m_pmda, 1 /*iVal*/));
+		pdxlnTrailEdge->AddChild(CTranslatorUtils::PdxlnInt8Const(m_pmp, m_pmda, 1 /*iVal*/));
 	}
 	else
 	{
@@ -1464,29 +1464,29 @@ CTranslatorQueryToDXL::Pdrgpdxlws
 	DrgPdxlws *pdrgpdxlws = GPOS_NEW(m_pmp) DrgPdxlws(m_pmp);
 
 	// translate window specification
-	ListCell *plcWindowSpec = NULL;
-	ForEach (plcWindowSpec, plWindowClause)
+	ListCell *plcWindowCl;
+	ForEach (plcWindowCl, plWindowClause)
 	{
-		WindowSpec *pwindowspec = (WindowSpec *) lfirst(plcWindowSpec);
-		DrgPul *pdrgppulPartCol = PdrgpulPartCol(pwindowspec->partition, phmiulSortColsColId);
+		WindowClause *pwc = (WindowClause *) lfirst(plcWindowCl);
+		DrgPul *pdrgppulPartCol = PdrgpulPartCol(pwc->partitionClause, phmiulSortColsColId);
 
 		CDXLNode *pdxlnSortColList = NULL;
 		CMDName *pmdname = NULL;
 		CDXLWindowFrame *pdxlwf = NULL;
 
-		if (NULL != pwindowspec->name)
+		if (NULL != pwc->name)
 		{
-			CWStringDynamic *pstrAlias = CDXLUtils::PstrFromSz(m_pmp, pwindowspec->name);
+			CWStringDynamic *pstrAlias = CDXLUtils::PstrFromSz(m_pmp, pwc->name);
 			pmdname = GPOS_NEW(m_pmp) CMDName(m_pmp, pstrAlias);
 			GPOS_DELETE(pstrAlias);
 		}
 
-		if (0 < gpdb::UlListLength(pwindowspec->order))
+		if (0 < gpdb::UlListLength(pwc->orderClause))
 		{
 			// create a sorting col list
 			pdxlnSortColList = GPOS_NEW(m_pmp) CDXLNode(m_pmp, GPOS_NEW(m_pmp) CDXLScalarSortColList(m_pmp));
 
-			DrgPdxln *pdrgpdxlnSortCol = PdrgpdxlnSortCol(pwindowspec->order, phmiulSortColsColId);
+			DrgPdxln *pdrgpdxlnSortCol = PdrgpdxlnSortCol(pwc->orderClause, phmiulSortColsColId);
 			const ULONG ulSize = pdrgpdxlnSortCol->UlLength();
 			for (ULONG ul = 0; ul < ulSize; ul++)
 			{
@@ -1497,10 +1497,12 @@ CTranslatorQueryToDXL::Pdrgpdxlws
 			pdrgpdxlnSortCol->Release();
 		}
 
-		if (NULL != pwindowspec->frame)
-		{
-			pdxlwf = m_psctranslator->Pdxlwf((Expr *) pwindowspec->frame, m_pmapvarcolid, pdxlnScPrL, &m_fHasDistributedTables);
-		}
+		pdxlwf = m_psctranslator->Pdxlwf(pwc->frameOptions,
+						 pwc->startOffset,
+						 pwc->endOffset,
+						 m_pmapvarcolid,
+						 pdxlnScPrL,
+						 &m_fHasDistributedTables);
 
 		CDXLWindowSpec *pdxlws = GPOS_NEW(m_pmp) CDXLWindowSpec(m_pmp, pdrgppulPartCol, pmdname, pdxlnSortColList, pdxlwf);
 		pdrgpdxlws->Append(pdxlws);
@@ -1556,13 +1558,13 @@ CTranslatorQueryToDXL::PdxlnWindow
 		CDXLNode *pdxlnPrEl =  PdxlnPrEFromGPDBExpr(pte->expr, pte->resname);
 		ULONG ulColId = CDXLScalarProjElem::PdxlopConvert(pdxlnPrEl->Pdxlop())->UlId();
 
-		if (IsA(pte->expr, WindowRef))
+		if (IsA(pte->expr, WindowFunc))
 		{
 			CTranslatorUtils::CheckAggregateWindowFn((Node*) pte->expr);
 		}
 		if (!pte->resjunk)
 		{
-			if (IsA(pte->expr, Var) || IsA(pte->expr, WindowRef))
+			if (IsA(pte->expr, Var) || IsA(pte->expr, WindowFunc))
 			{
 				// add window functions and non-computed columns to the project list of the window operator
 				pdxlnPrL->AddChild(pdxlnPrEl);
@@ -1615,7 +1617,7 @@ CTranslatorQueryToDXL::PdxlnWindow
 				pdxlnPrEl->Release();
 			}
 		}
-		else if (IsA(pte->expr, WindowRef))
+		else if (IsA(pte->expr, WindowFunc))
 		{
 			// computed columns used in the order by clause
 			pdxlnPrL->AddChild(pdxlnPrEl);
@@ -4087,6 +4089,11 @@ CTranslatorQueryToDXL::ConstructCTEProducerList
 		CommonTableExpr *pcte = (CommonTableExpr *) lfirst(plc);
 		GPOS_ASSERT(IsA(pcte->ctequery, Query));
 		
+		if (pcte->cterecursive)
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("WITH RECURSIVE"));
+		}
+
 		Query *pqueryCte = CQueryMutators::PqueryNormalize(m_pmp, m_pmda, (Query *) pcte->ctequery, ulCteQueryLevel + 1);
 		
 		// the query representing the cte can only access variables defined in the current level as well as

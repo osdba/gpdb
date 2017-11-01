@@ -67,7 +67,7 @@ endif
 abs_srcdir := $(shell cd "$(srcdir)" && pwd)
 
 installcheck: all
-	$(top_builddir)/src/test/regress/pg_regress --dbname=mapred_regression --inputdir=$(srcdir) --top-builddir=$(top_builddir) --srcdir=$(abs_srcdir) --temp-port=$(TEMP_PORT) mapred
+	$(top_builddir)/src/test/regress/pg_regress --init-file=init_file --dbname=mapred_regression --inputdir=$(srcdir) --top-builddir=$(top_builddir) --srcdir=$(abs_srcdir) --temp-port=$(TEMP_PORT) mapred
 
 install: all installdirs
 	$(INSTALL_PROGRAM) gpmapreduce$(X) '$(DESTDIR)$(bindir)/gpmapreduce$(X)'
@@ -79,7 +79,7 @@ uninstall:
 	rm -f '$(DESTDIR)$(bindir)/gpmapreduce$(X)'
 
 clean distclean maintainer-clean: clean-lib
-	rm -f gpmapreduce$(X) $(MAPREDOBJS) $(GENOBJS)
+	rm -f gpmapreduce$(X) $(MAPREDOBJS) $(GENOBJS) $(OBJS)
 
 # Other dependencies
 $(SRCDIR)/yaml_parse.c  : $(INCDIR)/parser.h $(INCDIR)/mapred.h

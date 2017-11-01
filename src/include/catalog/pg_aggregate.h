@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/catalog/pg_aggregate.h,v 1.65 2008/01/01 19:45:56 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/catalog/pg_aggregate.h,v 1.66 2008/03/27 03:57:34 tgl Exp $
  *
  * NOTES
  *	  the genbki.sh script reads this file and generates .bki
@@ -39,13 +39,7 @@
  *  aggorder            array of ordering columns (can be NULL)
  * ----------------------------------------------------------------
  */
-
-/* ----------------
- *		pg_aggregate definition.  cpp turns this into
- *		typedef struct FormData_pg_aggregate
- * ----------------
- */
-#define AggregateRelationId	2600
+#define AggregateRelationId  2600
 
 CATALOG(pg_aggregate,2600) BKI_WITHOUT_OIDS
 {
@@ -77,7 +71,6 @@ FOREIGN_KEY(aggtranstype REFERENCES pg_type(oid));
  * ----------------
  */
 typedef FormData_pg_aggregate *Form_pg_aggregate;
-
 
 /* ----------------
  *		compiler constants for pg_aggregate

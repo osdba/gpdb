@@ -29,7 +29,7 @@ select count(*) from hjtest a1, hjtest a2 where a2.i = least (a1.i,4) and a2.j =
 -- 1. Use FULL OUTER JOIN to induce a Merge Join
 -- 2. Use a large tuple size to induce a Materialize
 -- 3. Use gp_dist_random() to induce a Redistribute
----
+--
 
 set enable_hashjoin to off;
 set enable_mergejoin to on;
@@ -168,6 +168,68 @@ set enable_hashjoin to off;
 set enable_mergejoin to on;
 
 select * from foo where a not in (select c from bar where c <= 5);
+
+set enable_nestloop to off;
+set enable_hashjoin to on;
+set enable_mergejoin to off;
+
+create table dept
+(
+	id int,
+	pid int,
+	name char(40)
+);
+
+insert into dept values(3, 0, 'root');
+insert into dept values(4, 3, '2<-1');
+insert into dept values(5, 4, '3<-2<-1');
+insert into dept values(6, 4, '4<-2<-1');
+insert into dept values(7, 3, '5<-1');
+insert into dept values(8, 7, '5<-1');
+insert into dept select i, i % 6 + 3 from generate_series(9,50) as i;
+insert into dept select i, 99 from generate_series(100,15000) as i;
+
+ANALYZE dept;
+
+-- Test rescannable hashjoin with spilling hashtable for buffile
+set statement_mem='1000kB';
+set gp_workfile_type_hashjoin=buffile;
+WITH RECURSIVE subdept(id, parent_department, name) AS
+(
+	-- non recursive term
+	SELECT * FROM dept WHERE name = 'root'
+	UNION ALL
+	-- recursive term
+	SELECT d.* FROM dept AS d, subdept AS sd
+		WHERE d.pid = sd.id
+)
+SELECT count(*) FROM subdept;
+
+-- Test rescannable hashjoin with spilling hashtable for bfz
+set gp_workfile_type_hashjoin=bfz;
+WITH RECURSIVE subdept(id, parent_department, name) AS
+(
+	-- non recursive term
+	SELECT * FROM dept WHERE name = 'root'
+	UNION ALL
+	-- recursive term
+	SELECT d.* FROM dept AS d, subdept AS sd
+		WHERE d.pid = sd.id
+)
+SELECT count(*) FROM subdept;
+
+-- Test rescannable hashjoin with in-memory hashtable
+reset statement_mem;
+WITH RECURSIVE subdept(id, parent_department, name) AS
+(
+	-- non recursive term
+	SELECT * FROM dept WHERE name = 'root'
+	UNION ALL
+	-- recursive term
+	SELECT d.* FROM dept AS d, subdept AS sd
+		WHERE d.pid = sd.id
+)
+SELECT count(*) FROM subdept;
 
 -- Cleanup
 set client_min_messages='warning'; -- silence drop-cascade NOTICEs

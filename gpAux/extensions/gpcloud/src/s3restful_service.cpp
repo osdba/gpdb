@@ -39,7 +39,7 @@ S3RESTfulService::~S3RESTfulService() {
 }
 
 // curl's write function callback.
-size_t RESTfulServiceWriteFuncCallback(char *ptr, size_t size, size_t nmemb, void *userp) {
+static size_t RESTfulServiceWriteFuncCallback(char *ptr, size_t size, size_t nmemb, void *userp) {
     if (S3QueryIsAbortInProgress()) {
         return 0;
     }
@@ -52,7 +52,7 @@ size_t RESTfulServiceWriteFuncCallback(char *ptr, size_t size, size_t nmemb, voi
 
 // cURL's write function callback, only used by DELETE request when query is canceled.
 // It shouldn't be interrupted.
-size_t RESTfulServiceAbortFuncCallback(char *ptr, size_t size, size_t nmemb, void *userp) {
+static size_t RESTfulServiceAbortFuncCallback(char *ptr, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
     Response *resp = (Response *)userp;
     resp->appendDataBuffer(ptr, realsize);
@@ -60,7 +60,8 @@ size_t RESTfulServiceAbortFuncCallback(char *ptr, size_t size, size_t nmemb, voi
 }
 
 // curl's headers write function callback.
-size_t RESTfulServiceHeadersWriteFuncCallback(char *ptr, size_t size, size_t nmemb, void *userp) {
+static size_t RESTfulServiceHeadersWriteFuncCallback(char *ptr, size_t size, size_t nmemb,
+                                                     void *userp) {
     if (S3QueryIsAbortInProgress()) {
         return 0;
     }
@@ -72,7 +73,7 @@ size_t RESTfulServiceHeadersWriteFuncCallback(char *ptr, size_t size, size_t nme
 }
 
 // curl's reading function callback.
-size_t RESTfulServiceReadFuncCallback(char *ptr, size_t size, size_t nmemb, void *userp) {
+static size_t RESTfulServiceReadFuncCallback(char *ptr, size_t size, size_t nmemb, void *userp) {
     if (S3QueryIsAbortInProgress()) {
         return CURL_READFUNC_ABORT;
     }
@@ -121,8 +122,10 @@ struct CURLWrapper {
 void S3RESTfulService::performCurl(CURL *curl, Response &response) {
     CURLcode res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
-        if (res == CURLE_COULDNT_RESOLVE_HOST) {
+        if (res == CURLE_COULDNT_RESOLVE_HOST || res == CURLE_COULDNT_RESOLVE_PROXY) {
             S3_DIE(S3ResolveError, curl_easy_strerror(res));
+        } else if (res == CURLE_COULDNT_CONNECT) {
+            S3_DIE(S3ConnectionError, "Failed to connect to host or proxy.");
         } else {
             S3_DIE(S3ConnectionError, curl_easy_strerror(res));
         }

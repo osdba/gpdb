@@ -4,7 +4,7 @@
 # Copyright Greenplum 2006-2011
 ################################################################################
 
-default: all
+default: install
 
 top_builddir=../..
 ifneq "$(wildcard $(top_builddir)/src/Makefile.global)" ""
@@ -32,9 +32,9 @@ core: pygresql subprocess32
 	python gpconfig_modules/parse_guc_metadata.py $(prefix)
 
 ifneq "$(wildcard $(CURDIR)/pythonSrc/ext/*.tar.gz)" ""
-all: core lockfile paramiko pycrypto stream psutil
+install: core lockfile paramiko pycrypto stream psutil
 else
-all: core stream
+install: core stream
 endif
 
 #
@@ -61,13 +61,16 @@ pygresql:
 	. $(prefix)/greenplum_path.sh && unset PYTHONHOME && \
 	if [ `uname -s` = 'HP-UX' ]; then \
 	    cd $(PYLIB_SRC)/$(PYGRESQL_DIR) && DESTDIR="$(DESTDIR)" CC="$(CC)" LDFLAGS="-L../../../../gpAux/ext/hpux_ia64/python-2.5.6/lib" python setup.py build; \
+	elif [ "$(BLD_ARCH)" = 'aix7_ppc_64' ]; then \
+	    unset PYTHONPATH && cd $(PYLIB_SRC)/$(PYGRESQL_DIR) && DESTDIR="$(DESTDIR)" CC="$(CC)" python_64 setup.py build; \
 	else \
 	    cd $(PYLIB_SRC)/$(PYGRESQL_DIR) && DESTDIR="$(DESTDIR)" CC="$(CC)" python setup.py build; \
 	fi
-
 	mkdir -p $(PYLIB_DIR)/pygresql
 	if [ `uname -s` = 'Darwin' ]; then \
 	  cp -r $(PYLIB_SRC)/$(PYGRESQL_DIR)/build/lib.macosx*/* $(PYLIB_DIR)/pygresql; \
+	elif [ `uname -s` = 'AIX' ]; then \
+	  cp -r $(PYLIB_SRC)/$(PYGRESQL_DIR)/build/lib.aix*/* $(PYLIB_DIR)/pygresql; \
 	else \
 	  cp -r $(PYLIB_SRC)/$(PYGRESQL_DIR)/build/lib.linux*/* $(PYLIB_DIR)/pygresql; \
 	fi
@@ -82,7 +85,7 @@ paramiko:
 	@echo "--- paramiko"
 	cd $(PYLIB_SRC_EXT)/ && $(TAR) xzf $(PARAMIKO_DIR).tar.gz
 	cd $(PYLIB_SRC_EXT)/$(PARAMIKO_DIR)/ && python setup.py build
-	cp -r $(PYLIB_SRC_EXT)/$(PARAMIKO_DIR)/build/lib/paramiko  $(PYLIB_DIR)/
+	cp -r $(PYLIB_SRC_EXT)/$(PARAMIKO_DIR)/build/lib*/paramiko $(PYLIB_DIR)/
 
 #
 # LOCKFILE
@@ -93,15 +96,15 @@ paramiko:
 #
 LOCKFILE_VERSION=0.9.1
 LOCKFILE_DIR=lockfile-$(LOCKFILE_VERSION)
-LOCKFILE_SRC=$(PYLIB_SRC_EXT)/$(LOCKFILE_DIR)/build/lib/lockfile
+LOCKFILE_SRC=$(PYLIB_SRC_EXT)/$(LOCKFILE_DIR)/build/lib*/lockfile
 LOCKFILE_DST=$(PYLIB_DIR)/lockfile
 lockfile:
 	@echo "--- lockfile"
 	cd $(PYLIB_SRC_EXT)/ && $(TAR) xzf $(LOCKFILE_DIR).tar.gz
 	cd $(PYLIB_SRC_EXT)/$(LOCKFILE_DIR)/ && python setup.py build
-	mkdir -p $(PYLIB_DIR)/lockfile
-	awk 'BEGIN{print "# pylint: disable-all"} /^if hasattr/ {exit} { print }' < $(LOCKFILE_SRC)/__init__.py    > $(LOCKFILE_DST)/__init__.py
-	awk 'BEGIN{print "# pylint: disable-all"} { print }'                      < $(LOCKFILE_SRC)/pidlockfile.py > $(LOCKFILE_DST)/pidlockfile.py
+	mkdir -p $(LOCKFILE_DST)
+	awk 'BEGIN{print "# pylint: disable-all"} /^if hasattr/ {exit} { print }' < `echo $(LOCKFILE_SRC)/__init__.py`    > $(LOCKFILE_DST)/__init__.py
+	awk 'BEGIN{print "# pylint: disable-all"} { print }'                      < `echo $(LOCKFILE_SRC)/pidlockfile.py` > $(LOCKFILE_DST)/pidlockfile.py
 
 subprocess32:
 	@echo "--- subprocess32, Linux only"
@@ -118,9 +121,24 @@ PYCRYPTO_DIR=pycrypto-$(PYCRYPTO_VERSION)
 
 pycrypto:
 	@echo "--- pycrypto"
+ifeq "$(findstring $(BLD_ARCH),aix7_ppc_64 )" ""
 	cd $(PYLIB_SRC_EXT)/ && $(TAR) xzf $(PYCRYPTO_DIR).tar.gz
 	cd $(PYLIB_SRC_EXT)/$(PYCRYPTO_DIR)/ && CC="$(CC)" python setup.py build
 	cp -r $(PYLIB_SRC_EXT)/$(PYCRYPTO_DIR)/build/lib.*/Crypto $(PYLIB_DIR)
+endif
+
+#
+# PSI
+PSI_DIR=PSI-$(PSI_VERSION)
+
+ psi:
+	@echo "--- psi"
+ifeq "$(findstring $(BLD_ARCH),aix7_ppc_64 )" ""
+	cd $(PYLIB_SRC)/ && $(TAR) xzf $(PSI_DIR).tar.gz
+	cd $(PYLIB_SRC)/$(PSI_DIR)/ && CC="$(CC)" python setup.py build
+	cp -r $(PYLIB_SRC)/$(PSI_DIR)/build/lib.*/psi $(PYLIB_DIR)
+endif
+
 
 #
 # PSUTIL
@@ -130,10 +148,11 @@ PSUTIL_DIR=psutil-$(PSUTIL_VERSION)
 
 psutil:
 	@echo "--- psutil"
+ifeq "$(findstring $(BLD_ARCH),aix7_ppc_64 )" ""
 	cd $(PYLIB_SRC_EXT)/ && $(TAR) xzf $(PSUTIL_DIR).tar.gz
 	cd $(PYLIB_SRC_EXT)/$(PSUTIL_DIR)/ && CC="$(CC)" python setup.py build
 	cp -r $(PYLIB_SRC_EXT)/$(PSUTIL_DIR)/build/lib.*/psutil $(PYLIB_DIR)
-
+endif
 
 #
 # PYLINT
@@ -149,7 +168,7 @@ PYLINT_PYTHONPATH=$(PYLIB_DIR):$(PYLIB_SRC_EXT)/$(PYLINT_DIR)/build/lib/
 MOCK_VERSION=1.0.1
 MOCK_DIR=mock-$(MOCK_VERSION)
 BEHAVE_VERSION=1.2.4
-SETUP_TOOLS_VERSION=0.6c11
+SETUP_TOOLS_VERSION=36.6.0
 PARSE_VERSION=1.5.3
 ARG_PARSE_VERSION=1.2.1
 BEHAVE_DIR=behave-$(BEHAVE_VERSION)
@@ -197,7 +216,11 @@ $(BEHAVE_BIN):
 	@cd $(PYLIB_SRC_EXT)/$(SETUP_TOOLS_DIR)/ && PYTHONPATH=$(PYTHONSRC_INSTALL_PYTHON_PATH) python setup.py install --prefix $(PYTHONSRC_INSTALL)
 	@cd $(PYLIB_SRC_EXT)/$(PARSE_DIR)/ && PYTHONPATH=$(PYTHONSRC_INSTALL_PYTHON_PATH) python setup.py install --prefix $(PYTHONSRC_INSTALL)
 	@cd $(PYLIB_SRC_EXT)/$(ARG_PARSE_DIR)/ && PYTHONPATH=$(PYTHONSRC_INSTALL_PYTHON_PATH) python setup.py install --prefix $(PYTHONSRC_INSTALL)
-	@cd $(PYLIB_SRC_EXT)/$(BEHAVE_DIR)/ && PYTHONPATH=$(PYTHONSRC_INSTALL_PYTHON_PATH) python setup.py install --prefix $(PYTHONSRC_INSTALL)
+	# We're forcing a change in the requirements since we're in python
+	# 2.7.12. There's a new syntax in the python requirements for
+	# parse_type 0.4.2 which breaks if you're under 2.7.13
+	@cd $(PYLIB_SRC_EXT)/$(BEHAVE_DIR)/ && sed -i 's/parse_type>=0.3.4/parse_type==0.4.1/' setup.py \
+		&& PYTHONPATH=$(PYTHONSRC_INSTALL_PYTHON_PATH) python setup.py install --prefix $(PYTHONSRC_INSTALL)
 	@echo "--- behave done"
 
 PYTHON_FILES=`grep -l --exclude=Makefile --exclude=gplogfilter "/bin/env python" *`\

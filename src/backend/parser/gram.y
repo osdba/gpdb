@@ -7,12 +7,13 @@
  *	  POSTGRES SQL YACC rules/actions
  *
  * Portions Copyright (c) 2006-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/parser/gram.y,v 2.625 2008/10/04 21:56:54 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/parser/gram.y,v 2.611 2008/03/28 00:21:55 tgl Exp $
  *
  * HISTORY
  *	  AUTHOR			DATE			MAJOR EVENT
@@ -92,6 +93,10 @@
 #define YYMALLOC palloc
 #define YYFREE   pfree
 
+
+#define parser_yyerror(msg)  scanner_yyerror(msg)
+#define parser_errposition(pos)  scanner_errposition(pos)
+
 extern List *parsetree;			/* final parse result is delivered here */
 
 static bool QueryIsRule = FALSE;
@@ -110,7 +115,6 @@ static Node *makeIntConst(int val, int location);
 static Node *makeFloatConst(char *str, int location);
 static Node *makeNullAConst(int location);
 static Node *makeAConst(Value *v, int location);
-static Node *makeAArrayExpr(List *elements, int location);
 static A_Const *makeBoolAConst(bool state, int location);
 static FuncCall *makeOverlaps(List *largs, List *rargs, int location);
 static void check_qualified_name(List *names);
@@ -124,11 +128,12 @@ static void insertSelectOptions(SelectStmt *stmt,
 static Node *makeSetOp(SetOperation op, bool all, Node *larg, Node *rarg);
 static Node *doNegate(Node *n, int location);
 static void doNegateFloat(Value *v);
+static Node *makeAArrayExpr(List *elements, int location);
 static Node *makeXmlExpr(XmlExprOp op, char *name, List *named_args,
 						 List *args, int location);
 static List *mergeTableFuncParameters(List *func_args, List *columns);
 static TypeName *TableFuncTypeName(List *columns);
-static void setWindowExclude(WindowFrame *wframe, WindowExclusion exclude);
+static void checkWindowExclude(void);
 static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 
 %}
@@ -158,6 +163,7 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 	FuncWithArgs		*funwithargs;
 	DefElem				*defelt;
 	SortBy				*sortby;
+	WindowDef			*windef;
 	JoinExpr			*jexpr;
 	IndexElem			*ielem;
 	Alias				*alias;
@@ -173,28 +179,22 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 }
 
 %type <node>	stmt schema_stmt
-		AlterDatabaseStmt AlterDatabaseSetStmt AlterDomainStmt
-		AlterGroupStmt
-		AlterObjectSchemaStmt AlterOwnerStmt AlterQueueStmt AlterSeqStmt AlterTableStmt
+		AlterDatabaseStmt AlterDatabaseSetStmt AlterDomainStmt AlterGroupStmt
+		AlterObjectSchemaStmt AlterOwnerStmt AlterSeqStmt AlterTableStmt
 		AlterExtensionStmt AlterExtensionContentsStmt
-		AlterUserStmt AlterUserSetStmt AlterResourceGroupStmt AlterRoleStmt AlterRoleSetStmt
+		AlterUserStmt AlterUserSetStmt AlterRoleStmt AlterRoleSetStmt
 		AnalyzeStmt ClosePortalStmt ClusterStmt CommentStmt
 		ConstraintsSetStmt CopyStmt CreateAsStmt CreateCastStmt
-		CreateDomainStmt CreateExtensionStmt CreateExternalStmt CreateFileSpaceStmt CreateGroupStmt
-		CreateOpClassStmt
+		CreateDomainStmt CreateExtensionStmt CreateGroupStmt CreateOpClassStmt
 		CreateOpFamilyStmt AlterOpFamilyStmt CreatePLangStmt
-		CreateQueueStmt CreateResourceGroupStmt CreateSchemaStmt CreateSeqStmt CreateStmt
-		CreateTableSpaceStmt
-		CreateAssertStmt CreateTrigStmt 
-		CreateUserStmt CreateRoleStmt
+		CreateSchemaStmt CreateSeqStmt CreateStmt CreateTableSpaceStmt
+		CreateAssertStmt CreateTrigStmt CreateUserStmt CreateRoleStmt
 		CreatedbStmt DeclareCursorStmt DefineStmt DeleteStmt DiscardStmt DoStmt
-		DropGroupStmt DropOpClassStmt DropOpFamilyStmt DropPLangStmt DropQueueStmt DropResourceGroupStmt DropStmt
+		DropGroupStmt DropOpClassStmt DropOpFamilyStmt DropPLangStmt DropStmt
 		DropAssertStmt DropTrigStmt DropRuleStmt DropCastStmt DropRoleStmt
-		DropUserStmt DropdbStmt
-		ExplainStmt
-		ExtTypedesc FetchStmt
+		DropUserStmt DropdbStmt ExplainStmt FetchStmt
 		GrantStmt GrantRoleStmt IndexStmt InsertStmt ListenStmt LoadStmt
-		LockStmt NotifyStmt OptSingleRowErrorHandling ExplainableStmt PreparableStmt
+		LockStmt NotifyStmt ExplainableStmt PreparableStmt
 		CreateFunctionStmt AlterFunctionStmt ReindexStmt RemoveAggrStmt
 		RemoveFuncStmt RemoveOperStmt RenameStmt RevokeStmt RevokeRoleStmt
 		RuleActionStmt RuleActionStmtOrEmpty RuleStmt
@@ -205,7 +205,13 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 		DeallocateStmt PrepareStmt ExecuteStmt
 		DropOwnedStmt ReassignOwnedStmt
 		AlterTSConfigurationStmt AlterTSDictionaryStmt
-		AlterTypeStmt 
+
+/* GPDB-specific commands */
+%type <node>	AlterTypeStmt AlterQueueStmt AlterResourceGroupStmt
+		CreateExternalStmt CreateFileSpaceStmt
+		CreateQueueStmt CreateResourceGroupStmt
+		DropQueueStmt DropResourceGroupStmt
+		ExtTypedesc OptSingleRowErrorHandling
 
 %type <node>    deny_login_role deny_interval deny_point deny_day_specifier
 
@@ -215,22 +221,26 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 %type <node>	alter_column_default opclass_item opclass_drop alter_using
 %type <ival>	add_drop opt_asc_desc opt_nulls_order
 
-%type <node>	alter_table_cmd alter_rel_cmd alter_table_partition_id_spec
-				alter_table_partition_cmd
-				alter_table_partition_id_spec_with_opt_default
+%type <node>	alter_table_cmd alter_rel_cmd
 %type <list>	alter_table_cmds alter_rel_cmds
-				part_values_clause multi_spec_value_list part_values_single
+
+%type <node>	alter_table_partition_cmd alter_table_partition_id_spec
+				alter_table_partition_id_spec_with_opt_default
+%type <list>	part_values_clause multi_spec_value_list part_values_single
 %type <ival>	opt_table_partition_exchange_validate partition_hash_keyword
 				partition_coalesce_keyword
 
 %type <dbehavior>	opt_drop_behavior
 
 %type <list>	createdb_opt_list alterdb_opt_list copy_opt_list
-				ext_on_clause_list format_opt format_opt_list format_def_list transaction_mode_list
+				transaction_mode_list
+%type <defelt>	createdb_opt_item alterdb_opt_item copy_opt_item
+				transaction_mode_item
+
+%type <list>	ext_on_clause_list format_opt format_opt_list format_def_list
 				ext_options ext_options_opt ext_options_list
 				ext_opt_encoding_list create_extension_opt_list alter_extension_opt_list
-%type <defelt>	createdb_opt_item alterdb_opt_item copy_opt_item
-				ext_on_clause_item format_opt_item format_def_item transaction_mode_item
+%type <defelt>	ext_on_clause_item format_opt_item format_def_item
 				ext_options_item
 				ext_opt_encoding_item create_extension_opt_item alter_extension_opt_item
 
@@ -318,7 +328,8 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 %type <fun_param_mode> arg_class
 %type <typnam>	func_return func_type
 
-%type <boolean>  TriggerForType OptTemp OptWeb OptWritable OptSrehLimitType OptLogErrorTable
+%type <boolean>  TriggerForType OptTemp
+%type <boolean>  OptWeb OptWritable OptSrehLimitType OptLogErrorTable
 %type <oncommit> OnCommitOption
 
 %type <node>	for_locking_item
@@ -342,7 +353,7 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 %type <boolean> codegen
 %type <defelt>	opt_binary opt_oids copy_delimiter
 
-%type <boolean> copy_from skip_external_partition
+%type <boolean> copy_from opt_program skip_external_partition
 
 %type <ival>	opt_column event cursor_options opt_hold
 %type <objtype>	reindex_type drop_type comment_type
@@ -357,25 +368,15 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 %type <istmt>	insert_rest
 
 %type <vsetstmt> set_rest SetResetClause
-%type <node>	TableElement ExtTableElement ConstraintElem TableFuncElement
-%type <node>	columnDef ExtcolumnDef
-%type <node>	cdb_string
+%type <node>	TableElement ConstraintElem TableFuncElement
+%type <node>	columnDef
 %type <defelt>	def_elem old_aggr_elem keyvalue_pair
+%type <node>	ExtTableElement
+%type <node>	ExtcolumnDef
+%type <node>	cdb_string
 %type <node>	def_arg columnElem where_clause where_or_current_clause
 				a_expr b_expr c_expr simple_func func_expr AexprConst indirection_el
 				columnref in_expr having_clause func_table array_expr
-%type <list>	window_definition_list window_clause
-%type <boolean>	window_frame_units
-%type <ival>	window_frame_exclusion
-%type <node>	window_spec
-%type <node>	window_frame_extent
-				window_frame_start window_frame_preceding window_frame_between
-				window_frame_bound window_frame_following 
-				window_frame_clause opt_window_frame_clause
-%type <list>	window_partition_clause opt_window_partition_clause
-				opt_window_order_clause
-%type <str>		opt_window_name window_name
-
 %type <list>	row type_list array_expr_list
 %type <node>	case_expr case_arg when_clause when_operand case_default
 %type <list>	when_clause_list
@@ -476,6 +477,13 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 %type <with> 	with_clause
 %type <list>	cte_list
 
+%type <list>	window_clause window_definition_list opt_partition_clause
+%type <windef>	window_definition over_clause window_specification
+%type <list>	opt_window_order_clause
+%type <str>		opt_existing_window_name
+%type <windef>	opt_frame_clause frame_extent frame_bound
+%type <ival>	window_frame_exclusion
+
 
 /*
  * If you make any token changes, update the keyword table in
@@ -505,7 +513,7 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 	DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P DOUBLE_P DROP
 
 	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EXCEPT
-    EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN EXTENSION EXTERNAL EXTRACT
+	EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN EXTENSION EXTERNAL EXTRACT
 
 	FALSE_P FAMILY FETCH FIRST_P FLOAT_P FOR FORCE FOREIGN FORWARD
 	FREEZE FROM FULL FUNCTION
@@ -527,8 +535,8 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 	LIKE LIMIT LISTEN LOAD LOCAL LOCALTIME LOCALTIMESTAMP LOCATION
 	LOCK_P LOGIN_P
 
-	MAPPING MATCH MAXVALUE MEMORY_LIMIT MEMORY_SHARED_QUOTA MINUTE_P MINVALUE
-	MODE MONTH_P MOVE
+	MAPPING MATCH MAXVALUE MEMORY_LIMIT MEMORY_SHARED_QUOTA MEMORY_SPILL_RATIO
+	MINUTE_P MINVALUE MODE MONTH_P MOVE
 
 	NAME_P NAMES NATIONAL NATURAL NCHAR NEW NEXT NO NOCREATEDB
 	NOCREATEROLE NOCREATEUSER NOINHERIT NOLOGIN_P NONE NOSUPERUSER
@@ -539,7 +547,7 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 
 	PARSER PARTIAL PASSWORD PLACING PLANS POSITION
 	PRECISION PRESERVE PREPARE PREPARED PRIMARY
-	PRIOR PRIVILEGES PROCEDURAL PROCEDURE
+	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROGRAM
 
 	QUOTE
 
@@ -607,7 +615,7 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 	RANDOMLY RANGE READABLE READS REF REJECT_P RESOURCE
 	ROLLUP ROOTPARTITION
 
-	SCATTER SEGMENT SETS SPLIT SQL SUBPARTITION SUBPARTITIONS
+	SCATTER SEGMENT SEGMENTS SETS SPLIT SQL SUBPARTITION SUBPARTITIONS
 
 	THRESHOLD TIES
 
@@ -789,6 +797,7 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 			%nonassoc MAXVALUE
 			%nonassoc MEMORY_LIMIT
 			%nonassoc MEMORY_SHARED_QUOTA
+			%nonassoc MEMORY_SPILL_RATIO
 			%nonassoc MERGE
 			%nonassoc MINUTE_P
 			%nonassoc MINVALUE
@@ -868,6 +877,7 @@ static Node *makeIsNotDistinctFromNode(Node *expr, int position);
 			%nonassoc SECOND_P
 			%nonassoc SECURITY
 			%nonassoc SEGMENT
+			%nonassoc SEGMENTS
 			%nonassoc SEQUENCE
 			%nonassoc SERIALIZABLE
 			%nonassoc SESSION
@@ -1341,6 +1351,10 @@ OptResourceGroupElem:
 			| MEMORY_LIMIT IntegerOnly
 				{
 					$$ = makeDefElem("memory_limit", (Node *)$2);
+				}
+			| MEMORY_SPILL_RATIO IntegerOnly
+				{
+					$$ = makeDefElem("memory_spill_ratio", (Node *)$2);
 				}
 		;
 
@@ -3296,13 +3310,17 @@ ClosePortalStmt:
  *				for backward compatibility.  2002-06-18
  *
  *				COPY ( SELECT ... ) TO file [WITH options]
+ *
+ *				where 'file' can be one of:
+ *				{ PROGRAM 'command' | STDIN | STDOUT | 'filename' }
+ *
  *				This form doesn't have the backwards-compatible option
  *				syntax.
  *
  *****************************************************************************/
 
 CopyStmt:	COPY opt_binary qualified_name opt_column_list opt_oids
-			copy_from copy_file_name copy_delimiter opt_with copy_opt_list
+			copy_from opt_program copy_file_name copy_delimiter opt_with copy_opt_list
 			OptSingleRowErrorHandling skip_external_partition
 				{
 					CopyStmt *n = makeNode(CopyStmt);
@@ -3310,26 +3328,28 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list opt_oids
 					n->query = NULL;
 					n->attlist = $4;
 					n->is_from = $6;
-					n->filename = $7;
-					n->sreh = $11;
+					n->is_program = $7;
+					n->filename = $8;
+					n->sreh = $12;
 					n->partitions = NULL;
 					n->ao_segnos = NIL;
 
 					n->options = NIL;
-					n->skip_ext_partition = $12;
+					n->skip_ext_partition = $13;
 
 					/* Concatenate user-supplied flags */
 					if ($2)
 						n->options = lappend(n->options, $2);
 					if ($5)
 						n->options = lappend(n->options, $5);
-					if ($8)
-						n->options = lappend(n->options, $8);
-					if ($10)
-						n->options = list_concat(n->options, $10);
+					if ($9)
+						n->options = lappend(n->options, $9);
+					if ($11)
+						n->options = list_concat(n->options, $11);
+
 					$$ = (Node *)n;
 				}
-			| COPY select_with_parens TO copy_file_name opt_with
+			| COPY select_with_parens TO opt_program copy_file_name opt_with
 			  copy_opt_list
 				{
 					CopyStmt *n = makeNode(CopyStmt);
@@ -3337,11 +3357,13 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list opt_oids
 					n->query = $2;
 					n->attlist = NIL;
 					n->is_from = false;
-					n->filename = $4;
-					n->options = $6;
+					n->is_program = $4;
+					n->filename = $5;
+					n->options = $7;
 					n->partitions = NULL;
 					n->ao_segnos = NIL;
 					n->skip_ext_partition = false;
+
 					$$ = (Node *)n;
 				}
 		;
@@ -3349,6 +3371,11 @@ CopyStmt:	COPY opt_binary qualified_name opt_column_list opt_oids
 copy_from:
 			FROM									{ $$ = TRUE; }
 			| TO									{ $$ = FALSE; }
+		;
+
+opt_program:
+			PROGRAM									{ $$ = TRUE; }
+			| /* EMPTY */							{ $$ = FALSE; }
 		;
 
 skip_external_partition:
@@ -3575,7 +3602,7 @@ column_reference_storage_directive:
 					$$ = (Node *)n;
 				}
 		;
-				
+
 columnDef:	ColId Typename ColQualList opt_storage_encoding
 				{
 					ColumnDef *n = makeNode(ColumnDef);
@@ -3881,7 +3908,7 @@ opt_column_list:
 			'(' columnList ')'						{ $$ = $2; }
 			| /*EMPTY*/								{ $$ = NIL; }
 		;
-		
+
 columnList:
 			columnElem								{ $$ = list_make1($1); }
 			| columnList ',' columnElem				{ $$ = lappend($1, $3); }
@@ -5594,6 +5621,7 @@ TriggerOneEvent:
 			INSERT									{ $$ = 'i'; }
 			| DELETE_P								{ $$ = 'd'; }
 			| UPDATE								{ $$ = 'u'; }
+			| TRUNCATE								{ $$ = 't'; }
 		;
 
 TriggerForSpec:
@@ -7034,8 +7062,7 @@ CreateFunctionStmt:
 					$$ = (Node *)n;
 				}
 			| CREATE opt_or_replace FUNCTION func_name func_args_with_defaults
-			  RETURNS TABLE '(' table_func_column_list ')' 
-              createfunc_opt_list opt_definition
+			  RETURNS TABLE '(' table_func_column_list ')' createfunc_opt_list opt_definition
 				{
 					CreateFunctionStmt *n = makeNode(CreateFunctionStmt);
 					n->replace = $2;
@@ -7290,6 +7317,18 @@ common_func_opt_item:
 			| MODIFIES SQL DATA_P
 				{
 					$$ = makeDefElem("data_access", (Node *)makeString("modifies"));
+				}
+			| EXECUTE ON ANY
+				{
+					$$ = makeDefElem("exec_location", (Node *)makeString("any"));
+				}
+			| EXECUTE ON MASTER
+				{
+					$$ = makeDefElem("exec_location", (Node *)makeString("master"));
+				}
+			| EXECUTE ON ALL SEGMENTS
+				{
+					$$ = makeDefElem("exec_location", (Node *)makeString("all_segments"));
 				}
 		;
 
@@ -7615,7 +7654,7 @@ opt_force:	FORCE									{  $$ = TRUE; }
  *
  * Used to set storage parameter defaults for types.
  */
-AlterTypeStmt: ALTER TYPE_P SimpleTypename SET DEFAULT ENCODING definition
+AlterTypeStmt: ALTER TYPE_P any_name SET DEFAULT ENCODING definition
 				{
 					AlterTypeStmt *n = makeNode(AlterTypeStmt);
 
@@ -7825,6 +7864,14 @@ RenameStmt: ALTER AGGREGATE func_name aggr_args RENAME TO name
 					n->newname = $8;
 					$$ = (Node *)n;
 				}
+			| ALTER TYPE_P any_name RENAME TO name
+				{
+					RenameStmt *n = makeNode(RenameStmt);
+					n->renameType = OBJECT_TYPE;
+					n->object = $3;
+					n->newname = $6;
+					$$ = (Node *)n;
+				}
 			| ALTER PROTOCOL name RENAME TO name
 				{
 					RenameStmt *n = makeNode(RenameStmt);
@@ -7896,11 +7943,11 @@ AlterObjectSchemaStmt:
 					n->newschema = $6;
 					$$ = (Node *)n;
 				}
-			| ALTER TYPE_P SimpleTypename SET SCHEMA name
+			| ALTER TYPE_P any_name SET SCHEMA name
 				{
 					AlterObjectSchemaStmt *n = makeNode(AlterObjectSchemaStmt);
 					n->objectType = OBJECT_TYPE;
-					n->object = $3->names;
+					n->object = $3;
 					n->newschema = $6;
 					$$ = (Node *)n;
 				}
@@ -8005,11 +8052,11 @@ AlterOwnerStmt: ALTER AGGREGATE func_name aggr_args OWNER TO RoleId
 					n->newowner = $6;
 					$$ = (Node *)n;
 				}
-			| ALTER TYPE_P SimpleTypename OWNER TO RoleId
+			| ALTER TYPE_P any_name OWNER TO RoleId
 				{
 					AlterOwnerStmt *n = makeNode(AlterOwnerStmt);
 					n->objectType = OBJECT_TYPE;
-					n->object = $3->names;
+					n->object = $3;
 					n->newowner = $6;
 					$$ = (Node *)n;
 				}
@@ -9751,167 +9798,6 @@ having_clause:
 			| /*EMPTY*/								{ $$ = NULL; }
 		;
 
-window_clause:
-			WINDOW window_definition_list			{ $$ = $2; }
-			| /*EMPTY*/								{ $$ = NIL; }
-		;
-
-window_definition_list: 
-			window_name AS '(' window_spec ')'
-				{
-                    ((WindowSpec *)$4)->name = $1;
-                    ((WindowSpec *)$4)->location = @3;
-					$$ = list_make1($4);
-				}
-			| window_definition_list ',' window_name AS '(' window_spec ')'
-				{
-					((WindowSpec *)$6)->name = $3;
-					((WindowSpec *)$6)->location = @5;
-					$$ = lappend($1, $6);
-				}
-		;
-
-window_spec: opt_window_name opt_window_partition_clause 
-				opt_window_order_clause opt_window_frame_clause
-				{
-					WindowSpec *n = makeNode(WindowSpec);
-					n->parent = $1;
-					n->partition = $2;
-					n->order = $3;
-					n->frame = (WindowFrame *)$4;
-					n->location = -1;
-					$$ = (Node *)n;
-				}
-		;
-
-opt_window_name: window_name { $$ = $1; }
-			| /*EMPTY*/ { $$ = NULL; }
-		;
-
-opt_window_partition_clause: window_partition_clause { $$ = $1; }
-			| /*EMPTY*/ { $$ = NIL; }
-		;
-
-window_partition_clause: PARTITION BY sortby_list { $$ = (List *)$3; }
-		;
-
-opt_window_order_clause: sort_clause { $$ = $1; }
-			| /*EMPTY*/ { $$ = NIL; }
-        ;
-
-opt_window_frame_clause: window_frame_clause { $$ = $1; }
-		| /*EMPTY*/ { $$ = NULL; }
-		;
-
-window_frame_clause: window_frame_units window_frame_extent 
-			window_frame_exclusion
-				{
-					WindowFrame *n = makeNode(WindowFrame);
-					n->is_rows = $1;
-					setWindowExclude(n, $3);
-
-					if (IsA($2, List))
-					{
-						List *ex = (List *)$2;
-
-						n->trail = (WindowFrameEdge *)linitial(ex);
-						n->lead = (WindowFrameEdge *)lsecond(ex);
-						n->is_between = true;
-					}
-					else
-					{
-						Assert(IsA($2, WindowFrameEdge));
-						n->trail = (WindowFrameEdge *)$2;
-						n->lead = NULL;
-						n->is_between = false;
-					}
-					$$ = (Node *)n;
-				}
-		;
-
-/* units are either rows (true) otherwise false */
-window_frame_units: ROWS { $$ = true; }
-			| RANGE { $$ = false; }
-		;
-
-window_frame_extent:
-			window_frame_start { $$ = $1; }
-			| window_frame_between { $$ = $1; }
-		;
-
-window_frame_start:
-			UNBOUNDED PRECEDING
-				{
-					WindowFrameEdge *n = makeNode(WindowFrameEdge);
-					n->kind = WINDOW_UNBOUND_PRECEDING;
-					n->val = NULL;
-					$$ = (Node *)n;
-				}
-			| window_frame_preceding
-				{
-					WindowFrameEdge *n = makeNode(WindowFrameEdge);
-					n->kind = WINDOW_BOUND_PRECEDING;
-					n->val = $1;
-					$$ = (Node *)n;
-				}
-			| CURRENT_P ROW
-				{
-					WindowFrameEdge *n = makeNode(WindowFrameEdge);
-					n->kind = WINDOW_CURRENT_ROW;
-					$$ = (Node *)n;
-				}
-		;
-
-window_frame_preceding: a_expr PRECEDING 
-				{ 
-					$$ = (Node *)$1;
-				}
-		;
-
-window_frame_between: 
-			BETWEEN window_frame_bound AND window_frame_bound
-				{
-					/* slightly dodgy hack */
-					$$ = (Node *)list_make2($2, $4);
-				}
-		;
-
-/*
- * Be careful that we don't allow BETWEEN UNBOUND PRECEDING AND
- * UNBOUND PRECEDING
- */
-
-window_frame_bound:
-			window_frame_start { $$ = $1; }
-			| UNBOUNDED FOLLOWING 
-				{
-					WindowFrameEdge *n = makeNode(WindowFrameEdge);
-					n->kind = WINDOW_UNBOUND_FOLLOWING;
-					n->val = NULL;
-					$$ = (Node *)n;
-				}
-			| window_frame_following
-				{
-					WindowFrameEdge *n = makeNode(WindowFrameEdge);
-					n->kind = WINDOW_BOUND_FOLLOWING;
-					n->val = $1;
-					$$ = (Node *)n;
-				}
-		;
-
-window_frame_following: a_expr FOLLOWING 
-				{ 
-					$$ = (Node *)$1;
-				}
-		;
-
-window_frame_exclusion: EXCLUDE CURRENT_P ROW { $$ = WINDOW_EXCLUSION_CUR_ROW; }
-			| EXCLUDE GROUP_P { $$ = WINDOW_EXCLUSION_GROUP; }
-			| EXCLUDE TIES  { $$ = WINDOW_EXCLUSION_TIES; }
-			| EXCLUDE NO OTHERS { $$ = WINDOW_EXCLUSION_NO_OTHERS; }
-			| /*EMPTY*/ { $$ = WINDOW_EXCLUSION_NULL; }
-		;
-
 for_locking_clause:
 			for_locking_items						{ $$ = $1; }
 			| FOR READ ONLY							{ $$ = NIL; }
@@ -10705,10 +10591,6 @@ ConstDatetime:
 						$$ = SystemTypeName("timestamptz");
 					else
 						$$ = SystemTypeName("timestamp");
-					/* XXX the timezone field seems to be unused
-					 * - thomas 2001-09-06
-					 */
-					$$->timezone = $5;
 					$$->typmods = list_make1(makeIntConst($3, @3));
 					$$->location = @1;
 				}
@@ -10718,10 +10600,6 @@ ConstDatetime:
 						$$ = SystemTypeName("timestamptz");
 					else
 						$$ = SystemTypeName("timestamp");
-					/* XXX the timezone field seems to be unused
-					 * - thomas 2001-09-06
-					 */
-					$$->timezone = $2;
 					$$->location = @1;
 				}
 			| TIME '(' Iconst ')' opt_timezone
@@ -11303,19 +11181,22 @@ b_expr:		c_expr
  * ambiguity to the b_expr syntax.
  */
 c_expr:		columnref								{ $$ = $1; }
-			| func_expr OVER '(' window_spec ')'
+			| func_expr over_clause
 				{
 					/*
 					 * We break out the window function from func_expr
 					 * to avoid shift/reduce errors.
 					 */
-					if (IsA($1, FuncCall))
-						((FuncCall *)$1)->over = $4;
-					else
-						ereport(ERROR,
-								(errcode(ERRCODE_SYNTAX_ERROR),
-								 errmsg("window OVER clause can only be used "
-										"with an aggregate")));
+					if ($2)
+					{
+						if (IsA($1, FuncCall))
+							((FuncCall *) $1)->over = $2;
+						else
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("window OVER clause can only be used "
+											"with an aggregate")));
+					}
 
 					$$ = (Node *)$1;
 				}
@@ -11350,8 +11231,6 @@ c_expr:		columnref								{ $$ = $1; }
 			| case_expr
 				{ $$ = $1; }
 			| decode_expr
-				{ $$ = $1; }
-			| func_expr
 				{ $$ = $1; }
 			| select_with_parens			%prec UMINUS
 				{
@@ -11408,11 +11287,11 @@ c_expr:		columnref								{ $$ = $1; }
 			| ARRAY array_expr
 				{	$$ = $2;	}
             | TABLE '(' table_value_select_clause ')'
-				{	
+				{
 					TableValueExpr *n = makeNode(TableValueExpr);
 					n->subquery = $3;
 					n->location = @1;
-					$$ = (Node*) n;
+					$$ = (Node *)n;
 				}
 			| row
 				{
@@ -11439,15 +11318,6 @@ table_value_select_clause:
 		}
   		;
 
-/*
- * Users can write their own inline specification or refer to a
- * specification made after the WHERE clause
- */
-
-window_name: ColId { $$ = $1; }
-		;
-
-
 simple_func: 	func_name '(' ')'
 				{
 					FuncCall *n = makeNode(FuncCall);
@@ -11462,12 +11332,25 @@ simple_func: 	func_name '(' ')'
 					n->over = NULL;
 					$$ = (Node *)n;
 				}
+			| func_name '(' expr_list ')'
+				{
+					FuncCall *n = makeNode(FuncCall);
+					n->funcname = $1;
+					n->args = $3;
+					n->agg_order = NIL;
+					n->agg_star = FALSE;
+					n->agg_distinct = FALSE;
+					n->agg_filter = NULL;
+					n->location = @1;
+					n->over = NULL;
+					$$ = (Node *)n;
+				}
 			| func_name '(' VARIADIC a_expr ')'
 				{
 					FuncCall *n = makeNode(FuncCall);
 					n->funcname = $1;
 					n->args = list_make1($4);
-                    n->agg_order = NIL;
+					n->agg_order = NIL;
 					n->agg_star = FALSE;
 					n->agg_distinct = FALSE;
 					n->func_variadic = TRUE;
@@ -11481,23 +11364,10 @@ simple_func: 	func_name '(' ')'
 					FuncCall *n = makeNode(FuncCall);
 					n->funcname = $1;
 					n->args = lappend($3, $6);
-                    n->agg_order = NIL;
+					n->agg_order = NIL;
 					n->agg_star = FALSE;
 					n->agg_distinct = FALSE;
 					n->func_variadic = TRUE;
-					n->agg_filter = NULL;
-					n->location = @1;
-					n->over = NULL;
-					$$ = (Node *)n;
-				}
-			| func_name '(' expr_list ')'
-				{
-					FuncCall *n = makeNode(FuncCall);
-					n->funcname = $1;
-					n->args = $3;
-					n->agg_order = NULL;
-					n->agg_star = FALSE;
-					n->agg_distinct = FALSE;
 					n->agg_filter = NULL;
 					n->location = @1;
 					n->over = NULL;
@@ -12238,6 +12108,236 @@ xmlexists_argument:
 				}
 		;
 
+
+/*
+ * Window Definitions
+ */
+window_clause:
+			WINDOW window_definition_list			{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = NIL; }
+		;
+
+window_definition_list:
+			window_definition						{ $$ = list_make1($1); }
+			| window_definition_list ',' window_definition
+													{ $$ = lappend($1, $3); }
+		;
+
+window_definition:
+			ColId AS window_specification
+				{
+					WindowDef *n = $3;
+					n->name = $1;
+					$$ = n;
+				}
+		;
+
+over_clause: OVER window_specification
+				{ $$ = $2; }
+			| OVER ColId
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->name = $2;
+					n->refname = NULL;
+					n->partitionClause = NIL;
+					n->orderClause = NIL;
+					n->frameOptions = FRAMEOPTION_DEFAULTS;
+					n->startOffset = NULL;
+					n->endOffset = NULL;
+					n->location = @2;
+					$$ = n;
+				}
+			| /*EMPTY*/
+				{ $$ = NULL; }
+		;
+
+window_specification: '(' opt_existing_window_name opt_partition_clause
+				opt_window_order_clause opt_frame_clause ')'
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->name = NULL;
+					n->refname = $2;
+					n->partitionClause = $3;
+					n->orderClause = $4;
+					/* copy relevant fields of opt_frame_clause */
+					n->frameOptions = $5->frameOptions;
+					n->startOffset = $5->startOffset;
+					n->endOffset = $5->endOffset;
+					n->location = @1;
+					$$ = n;
+				}
+		;
+
+opt_existing_window_name: ColId						{ $$ = $1; }
+			| /*EMPTY*/ { $$ = NULL; }
+		;
+
+opt_partition_clause: PARTITION BY sortby_list { $$ = $3; }
+			| /*EMPTY*/ { $$ = NIL; }
+		;
+
+opt_window_order_clause: sort_clause { $$ = $1; }
+			| /*EMPTY*/ { $$ = NIL; }
+        ;
+
+/*
+ * For frame clauses, we return a WindowDef, but only some fields are used:
+ * frameOptions, startOffset, and endOffset.
+ *
+ * This is only a subset of the full SQL:2008 frame_clause grammar.
+ * We don't support <window frame exclusion> yet.
+ */
+opt_frame_clause:
+			RANGE frame_extent
+				window_frame_exclusion
+				{
+					WindowDef *n = $2;
+					n->frameOptions |= FRAMEOPTION_NONDEFAULT | FRAMEOPTION_RANGE;
+#if 0
+					if (n->frameOptions & (FRAMEOPTION_START_VALUE_PRECEDING |
+										   FRAMEOPTION_END_VALUE_PRECEDING))
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("RANGE PRECEDING is only supported with UNBOUNDED"),
+								 parser_errposition(@1)));
+					if (n->frameOptions & (FRAMEOPTION_START_VALUE_FOLLOWING |
+										   FRAMEOPTION_END_VALUE_FOLLOWING))
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("RANGE FOLLOWING is only supported with UNBOUNDED"),
+								 parser_errposition(@1)));
+#endif
+					$$ = n;
+				}
+			| ROWS frame_extent
+				window_frame_exclusion
+				{
+					WindowDef *n = $2;
+					n->frameOptions |= FRAMEOPTION_NONDEFAULT | FRAMEOPTION_ROWS;
+					$$ = n;
+				}
+			| /*EMPTY*/
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->frameOptions = FRAMEOPTION_DEFAULTS;
+					n->startOffset = NULL;
+					n->endOffset = NULL;
+					$$ = n;
+				}
+		;
+
+frame_extent: frame_bound
+				{
+					WindowDef *n = $1;
+					/* reject invalid cases */
+					if (n->frameOptions & FRAMEOPTION_START_UNBOUNDED_FOLLOWING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame start cannot be UNBOUNDED FOLLOWING"),
+								 parser_errposition(@1)));
+					if (n->frameOptions & FRAMEOPTION_START_VALUE_FOLLOWING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame starting from following row cannot end with current row"),
+								 parser_errposition(@1)));
+					n->frameOptions |= FRAMEOPTION_END_CURRENT_ROW;
+					$$ = n;
+				}
+			| BETWEEN frame_bound AND frame_bound
+				{
+					WindowDef *n1 = $2;
+					WindowDef *n2 = $4;
+					/* form merged options */
+					int		frameOptions = n1->frameOptions;
+					/* shift converts START_ options to END_ options */
+					frameOptions |= n2->frameOptions << 1;
+					frameOptions |= FRAMEOPTION_BETWEEN;
+					/* reject invalid cases */
+					if (frameOptions & FRAMEOPTION_START_UNBOUNDED_FOLLOWING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame start cannot be UNBOUNDED FOLLOWING"),
+								 parser_errposition(@2)));
+					if (frameOptions & FRAMEOPTION_END_UNBOUNDED_PRECEDING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame end cannot be UNBOUNDED PRECEDING"),
+								 parser_errposition(@4)));
+					if ((frameOptions & FRAMEOPTION_START_CURRENT_ROW) &&
+						(frameOptions & FRAMEOPTION_END_VALUE_PRECEDING))
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame starting from current row cannot have preceding rows"),
+								 parser_errposition(@4)));
+					if ((frameOptions & FRAMEOPTION_START_VALUE_FOLLOWING) &&
+						(frameOptions & (FRAMEOPTION_END_VALUE_PRECEDING |
+										 FRAMEOPTION_END_CURRENT_ROW)))
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame starting from following row cannot have preceding rows"),
+								 parser_errposition(@4)));
+					n1->frameOptions = frameOptions;
+					n1->endOffset = n2->startOffset;
+					$$ = n1;
+				}
+		;
+
+/*
+ * This is used for both frame start and frame end, with output set up on
+ * the assumption it's frame start; the frame_extent productions must reject
+ * invalid cases.
+ */
+frame_bound:
+			UNBOUNDED PRECEDING
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->frameOptions = FRAMEOPTION_START_UNBOUNDED_PRECEDING;
+					n->startOffset = NULL;
+					n->endOffset = NULL;
+					$$ = n;
+				}
+			| UNBOUNDED FOLLOWING
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->frameOptions = FRAMEOPTION_START_UNBOUNDED_FOLLOWING;
+					n->startOffset = NULL;
+					n->endOffset = NULL;
+					$$ = n;
+				}
+			| CURRENT_P ROW
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->frameOptions = FRAMEOPTION_START_CURRENT_ROW;
+					n->startOffset = NULL;
+					n->endOffset = NULL;
+					$$ = n;
+				}
+			| a_expr PRECEDING
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->frameOptions = FRAMEOPTION_START_VALUE_PRECEDING;
+					n->startOffset = $1;
+					n->endOffset = NULL;
+					$$ = n;
+				}
+			| a_expr FOLLOWING
+				{
+					WindowDef *n = makeNode(WindowDef);
+					n->frameOptions = FRAMEOPTION_START_VALUE_FOLLOWING;
+					n->startOffset = $1;
+					n->endOffset = NULL;
+					$$ = n;
+				}
+		;
+
+window_frame_exclusion: EXCLUDE CURRENT_P ROW { checkWindowExclude(); $$ = 0; }
+			| EXCLUDE GROUP_P { checkWindowExclude(); $$ = 0; }
+			| EXCLUDE TIES { checkWindowExclude(); $$ = 0; }
+			| EXCLUDE NO OTHERS { checkWindowExclude(); $$ = 0; }
+			| /*EMPTY*/ { $$ = 0; }
+		;
+
+
 /*
  * Supporting nonterminals for expressions.
  */
@@ -12341,6 +12441,7 @@ array_expr_list: array_expr							{ $$ = list_make1($1); }
 			| array_expr_list ',' array_expr		{ $$ = lappend($1, $3); }
 		;
 
+
 extract_list:
 			extract_arg FROM a_expr
 				{
@@ -12348,7 +12449,6 @@ extract_list:
 					n->val.type = T_String;
 					n->val.val.str = $1;
 					n->location = @1;
-
 					$$ = list_make2((Node *) n, $3);
 				}
 			| /*EMPTY*/								{ $$ = NIL; }
@@ -12357,7 +12457,6 @@ extract_list:
 /* Allow delimited string SCONST in extract_arg as an SQL extension.
  * - thomas 2001-04-12
  */
-
 extract_arg:
 			IDENT									{ $$ = $1; }
 			| YEAR_P								{ $$ = "year"; }
@@ -12671,11 +12770,10 @@ target_el:	a_expr AS ColLabel
 			 * as an infix expression, which we accomplish by assigning
 			 * IDENT a precedence higher than POSTFIXOP.
 			 *
-			 * In GPDB, we extent this to allow most
-			 * unreserved_keywords by also assigning them a
-			 * precedence.  There are certain keywords that can't work
-			 * without the as: reserved_keywords, the date modifier
-			 * suffixes (DAY, MONTH, YEAR, etc) and a few other
+			 * In GPDB, we extend this to allow most unreserved_keywords by
+			 * also assigning them a precedence.  There are certain keywords
+			 * that can't work without the as: reserved_keywords, the date
+			 * modifier suffixes (DAY, MONTH, YEAR, etc) and a few other
 			 * obscure cases.
 			 */
 			| a_expr IDENT
@@ -13137,6 +13235,7 @@ unreserved_keyword:
 			| MAXVALUE
 			| MEMORY_LIMIT
 			| MEMORY_SHARED_QUOTA
+			| MEMORY_SPILL_RATIO
 			| MERGE
 			| MINUTE_P
 			| MINVALUE
@@ -13189,6 +13288,7 @@ unreserved_keyword:
 			| PRIVILEGES
 			| PROCEDURAL
 			| PROCEDURE
+			| PROGRAM
 			| PROTOCOL
 			| QUEUE
 			| QUOTE
@@ -13225,6 +13325,7 @@ unreserved_keyword:
 			| SECOND_P
 			| SECURITY
 			| SEGMENT
+			| SEGMENTS
 			| SEQUENCE
 			| SERIALIZABLE
 			| SESSION
@@ -13434,6 +13535,7 @@ PartitionIdentKeyword: ABORT_P
 			| MAXVALUE
 			| MEMORY_LIMIT
 			| MEMORY_SHARED_QUOTA
+			| MEMORY_SPILL_RATIO
 			| MERGE
 			| MINVALUE
 			| MISSING
@@ -13505,6 +13607,7 @@ PartitionIdentKeyword: ABORT_P
 			| SEARCH
 			| SECURITY
 			| SEGMENT
+			| SEGMENTS
 			| SEQUENCE
 			| SERIALIZABLE
 			| SESSION
@@ -14056,7 +14159,6 @@ extractArgTypes(List *parameters)
 	{
 		FunctionParameter *p = (FunctionParameter *) lfirst(i);
 
-		/* keep if IN or INOUT or VARIADIC*/
 		if (p->mode != FUNC_PARAM_OUT && p->mode != FUNC_PARAM_TABLE)
 			result = lappend(result, p->argType);
 	}
@@ -14097,7 +14199,7 @@ insertSelectOptions(SelectStmt *stmt,
 		if (stmt->sortClause)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("syntax error at or near \"ORDER BY\""),
+					 errmsg("multiple ORDER BY clauses not allowed"),
 					 scanner_errposition(exprLocation((Node *) sortClause))));
 		stmt->sortClause = sortClause;
 	}
@@ -14108,7 +14210,7 @@ insertSelectOptions(SelectStmt *stmt,
 		if (stmt->limitOffset)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("syntax error at or near \"OFFSET\""),
+					 errmsg("multiple OFFSET clauses not allowed"),
 					 scanner_errposition(exprLocation(limitOffset))));
 		stmt->limitOffset = limitOffset;
 	}
@@ -14117,7 +14219,7 @@ insertSelectOptions(SelectStmt *stmt,
 		if (stmt->limitCount)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("syntax error at or near \"LIMIT\""),
+					 errmsg("multiple LIMIT clauses not allowed"),
 					 scanner_errposition(exprLocation(limitCount))));
 		stmt->limitCount = limitCount;
 	}
@@ -14224,7 +14326,7 @@ doNegateFloat(Value *v)
 	}
 }
 
-static Node*
+static Node *
 makeAArrayExpr(List *elements, int location)
 {
 	A_ArrayExpr *n = makeNode(A_ArrayExpr);
@@ -14329,42 +14431,20 @@ TableFuncTypeName(List *columns)
 }
 
 static void 
-setWindowExclude(WindowFrame *wframe, WindowExclusion exclude)
+checkWindowExclude(void)
 {
-	switch (exclude)
-	{
-		case WINDOW_EXCLUSION_NULL:
-			wframe->exclude = exclude;
-			return;
+	/*
+	 * because the syntax has historically existed without doing anything
+	 * we have chosen to add a guc to allow simply ignoring the exclude clause
+	 * rather than raising an error.
+	 */
+	if (gp_ignore_window_exclude)
+		return;
 
-		case WINDOW_EXCLUSION_CUR_ROW:	/* exclude current row */
-		case WINDOW_EXCLUSION_GROUP:	/* exclude rows matching us */
-		case WINDOW_EXCLUSION_TIES:		/* exclude rows matching us, and current row */
-		case WINDOW_EXCLUSION_NO_OTHERS: /* don't exclude */
-
-			/*
-			 * because the syntax has historically existed without doing anything
-			 * we have chosen to add a guc to allow simply ignoring the exclude clause
-			 * rather than raising an error.
-			 */
-			if (gp_ignore_window_exclude)
-			{
-				wframe->exclude = WINDOW_EXCLUSION_NULL;
-				return;
-			}
-
-			/* MPP-13628 */
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("window EXCLUDE clause not yet implemented")));
-			break;
-
-		default:
-			ereport(ERROR,
-					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("invalid window EXCLUDE clause")));
-			break;
-	}
+	/* MPP-13628 */
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("window EXCLUDE clause not yet implemented")));
 }
 
 /*

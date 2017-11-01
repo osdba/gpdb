@@ -88,11 +88,12 @@
  *
  *
  * Portions Copyright (c) 2007-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/sort/tuplesort.c,v 1.70 2006/10/04 00:30:04 momjian Exp $
+ *	  src/backend/utils/sort/tuplesort_mk.c
  *
  *-------------------------------------------------------------------------
  */
@@ -109,6 +110,7 @@
 #include "lib/stringinfo.h"		/* StringInfo */
 #include "executor/nodeSort.h"	/* gpmon */
 #include "miscadmin.h"
+#include "pg_trace.h"
 #include "utils/datum.h"
 #include "executor/execWorkfile.h"
 #include "utils/logtape.h"
@@ -202,6 +204,9 @@ typedef struct TupsortMergeReadCtxt
  */
 struct Tuplesortstate_mk
 {
+	/* MUST BE FIRST, to match switcheroo_Tuplesortstate */
+	bool		is_mk_tuplesortstate;
+
 	TupSortStatus status;		/* enumerated value as shown above */
 	int			nKeys;			/* number of columns in sort key */
 	bool		randomAccess;	/* did caller request random access? */
@@ -762,8 +767,7 @@ tuplesort_begin_heap_mk(ScanState *ss,
 
 	AssertArg(nkeys > 0);
 
-	if (trace_sort)
-		PG_TRACE3(tuplesort__begin, nkeys, workMem, randomAccess);
+	TRACE_POSTGRESQL_TUPLESORT_BEGIN(nkeys, workMem, randomAccess);
 
 	state->nKeys = nkeys;
 	state->copytup = copytup_heap;
@@ -890,8 +894,7 @@ tuplesort_begin_index_mk(Relation indexRel,
 
 	oldcontext = MemoryContextSwitchTo(state->sortcontext);
 
-	if (trace_sort)
-		PG_TRACE3(tuplesort__begin, enforceUnique, workMem, randomAccess);
+	TRACE_POSTGRESQL_TUPLESORT_BEGIN(enforceUnique, workMem, randomAccess);
 
 	state->nKeys = RelationGetNumberOfAttributes(indexRel);
 	tupdesc = RelationGetDescr(indexRel);
@@ -933,8 +936,7 @@ tuplesort_begin_datum_mk(ScanState *ss,
 
 	oldcontext = MemoryContextSwitchTo(state->sortcontext);
 
-	if (trace_sort)
-		PG_TRACE3(tuplesort__begin, datumType, workMem, randomAccess);
+	TRACE_POSTGRESQL_TUPLESORT_BEGIN(datumType, workMem, randomAccess);
 
 	state->nKeys = 1;			/* always a one-column sort */
 
@@ -951,6 +953,7 @@ tuplesort_begin_datum_mk(ScanState *ss,
 
 	state->sortOperator = sortOperator;
 	state->cmpScanKey = NULL;
+	state->nullfirst = nullsFirstFlag;
 	create_mksort_context(
 						  &state->mkctxt,
 						  1, NULL,
@@ -1044,8 +1047,7 @@ tuplesort_end_mk(Tuplesortstate_mk *state)
 	}
 
 
-	if (trace_sort)
-		PG_TRACE2(tuplesort__end, state->tapeset ? 1 : 0, spaceUsed);
+	TRACE_POSTGRESQL_TUPLESORT_END(state->tapeset ? 1 : 0, spaceUsed);
 
 	/*
 	 * Free the per-sort memory context, thereby releasing all working memory,
@@ -1336,8 +1338,7 @@ tuplesort_performsort_mk(Tuplesortstate_mk *state)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(state->sortcontext);
 
-	if (trace_sort)
-		PG_TRACE(tuplesort__perform__sort);
+	TRACE_POSTGRESQL_TUPLESORT_PERFORM_SORT();
 
 	switch (state->status)
 	{
@@ -1759,8 +1760,7 @@ inittapes_mk(Tuplesortstate_mk *state, const char *rwfile_prefix)
 	state->maxTapes = maxTapes;
 	state->tapeRange = maxTapes - 1;
 
-	if (trace_sort)
-		PG_TRACE1(tuplesort__switch__external, maxTapes);
+	TRACE_POSTGRESQL_TUPLESORT_SWITCH_EXTERNAL(maxTapes);
 
 	/*
 	 * Decrease availMem to reflect the space needed for tape buffers; but
@@ -2121,8 +2121,7 @@ mergeonerun_mk(Tuplesortstate_mk *state)
 	markrunend(state, destTape);
 	state->tp_runs[state->tapeRange]++;
 
-	if (trace_sort)
-		PG_TRACE1(tuplesort__mergeonerun, state->activeTapes);
+	TRACE_POSTGRESQL_TUPLESORT_MERGEONERUN(state->activeTapes);
 }
 
 static bool
@@ -2427,8 +2426,7 @@ dumptuples_mk(Tuplesortstate_mk *state, bool alltuples)
 			state->tp_runs[state->destTape]++;
 			state->tp_dummy[state->destTape]--; /* per Alg D step D2 */
 
-			if (trace_sort)
-				PG_TRACE3(tuplesort__dumptuples, state->entry_count, state->currentRun, state->destTape);
+			TRACE_POSTGRESQL_TUPLESORT_DUMPTUPLES(state->entry_count, state->currentRun, state->destTape);
 
 			/*
 			 * Done if heap is empty, else prepare for new run.

@@ -5,7 +5,12 @@
  * 		QEs.
  *
  *
- * Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/postmaster/seqserver.c
  *
  *-------------------------------------------------------------------------
  */
@@ -41,6 +46,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/ps_status.h"
 #include "storage/backendid.h"
+#include "utils/resowner.h"
 #include "utils/syscache.h"
 
 #include "tcop/tcopprot.h"
@@ -995,6 +1001,8 @@ listenerSetup(void)
 
 		close(listenerFd);
 	}
+
+	freeaddrinfo(addrs);
 
 	if (rp == NULL)
 	{               /* No address succeeded */

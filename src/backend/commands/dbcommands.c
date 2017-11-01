@@ -9,12 +9,13 @@
  * on pg_database, but that's too coarse-grained.
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/dbcommands.c,v 1.204.2.5 2010/03/25 14:45:06 alvherre Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/dbcommands.c,v 1.205 2008/03/26 21:10:37 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -57,7 +58,9 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 #include "cdb/cdbdisp_query.h"
 #include "cdb/cdbdispatchresult.h"
@@ -411,9 +414,9 @@ static void copy_append_only_segment_file(
 {
 	MIRRORED_LOCK_DECLARE;
 
+	char		   *basepath;
 	char srcFileName[MAXPGPATH];
 	char dstFileName[MAXPGPATH];
-	char extension[12];
 
 	File		srcFile;
 
@@ -446,18 +449,12 @@ static void copy_append_only_segment_file(
 			 ItemPointerToString(persistentTid),
 			 eof);
 
+	basepath = relpath(*srcRelFileNode);
 	if (segmentFileNum > 0)
-	{
-		sprintf(extension, ".%u", segmentFileNum);
-	}
+		snprintf(srcFileName, sizeof(srcFileName), "%s.%u", basepath, segmentFileNum);
 	else
-		extension[0] = '\0';
-	
-	CopyRelPath(srcFileName, MAXPGPATH, *srcRelFileNode);
-	if (segmentFileNum > 0)
-	{
-		strcat(srcFileName, extension);
-	}
+		snprintf(srcFileName, sizeof(srcFileName), "%s", basepath);
+	pfree(basepath);
 
 	/*
 	 * Open the files
@@ -468,11 +465,12 @@ static void copy_append_only_segment_file(
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", srcFileName)));
 
-	CopyRelPath(dstFileName, MAXPGPATH, *dstRelFileNode);
+	basepath = relpath(*dstRelFileNode);
 	if (segmentFileNum > 0)
-	{
-		strcat(dstFileName, extension);
-	}
+		snprintf(dstFileName, sizeof(dstFileName), "%s.%u", basepath, segmentFileNum);
+	else
+		snprintf(dstFileName, sizeof(dstFileName), "%s", basepath);
+	pfree(basepath);
 
 	MirroredAppendOnly_OpenReadWrite(
 							&mirroredDstOpen,

@@ -29,34 +29,17 @@
  * All PXF's resources are under /PXF_SERVICE_PREFIX/PXF_VERSION/...
  */
 #define PXF_SERVICE_PREFIX "pxf"
-#define PXF_VERSION "v15" /* PXF version */
+#define PXF_VERSION "v15"		/* PXF version */
 #define PROTOCOL_PXF "pxf://"
 #define IS_PXF_URI(uri_str) (pg_strncasecmp(uri_str, PROTOCOL_PXF, strlen(PROTOCOL_PXF)) == 0)
-
-/*
- * FragmentData - describes a single Hadoop file split / HBase table region
- * in means of location (ip, port), the source name of the specific file/table that is being accessed,
- * and the index of a of list of fragments (splits/regions) for that source name.
- * The index refers to the list of the fragments of that source name.
- * user_data is optional.
- */
-typedef struct FragmentData
-{
-	char	 *authority;
-	char	 *index;
-	char	 *source_name;
-	char	 *fragment_md;
-	char	 *user_data;
-	char	 *profile;
-} FragmentData;
 
 /*
  * Structure to store options data, such as types of fragmenters, accessors and resolvers
  */
 typedef struct OptionData
 {
-	char	 *key;
-	char	 *value;
+	char	   *key;
+	char	   *value;
 } OptionData;
 
 /*
@@ -64,24 +47,32 @@ typedef struct OptionData
  */
 typedef struct GPHDUri
 {
-    char 			*uri;		/* the unparsed user uri	*/
-	char			*protocol;	/* the protocol name		*/
-	char			*host;		/* host name str			*/
-	char			*port;		/* port number as string	*/
-	char			*data;      /* data location (path)     */
-	char			*profile;   /* profile option			*/
-	List			*fragments; /* list of FragmentData		*/
-	List			*options;   /* list of OptionData 		*/
+	char	   *uri;			/* the unparsed user uri    */
+	char	   *protocol;		/* the protocol name        */
+	char	   *host;			/* host name str            */
+	char	   *port;			/* port number as string    */
+	char	   *data;			/* data location (path)     */
+	char	   *profile;		/* profile option           */
+	List	   *fragments;		/* list of fragments        */
+	List	   *options;		/* list of OptionData       */
 } GPHDUri;
 
 /*
  * Parses a string URI into a data structure
  */
-GPHDUri	*parseGPHDUri(const char *uri_str);
+GPHDUri    *parseGPHDUri(const char *uri_str);
+GPHDUri    *parseGPHDUriHostPort(const char *uri_str, const char *host, const int port);
+
+/*
+ * Validation functions
+ */
+bool		GPHDUri_opt_exists(GPHDUri *uri, char *key);
+void		GPHDUri_verify_no_duplicate_options(GPHDUri *uri);
+void		GPHDUri_verify_core_options_exist(GPHDUri *uri, List *coreOptions);
 
 /*
  * Frees the elements of the data structure
  */
-void 	 freeGPHDUri(GPHDUri *uri);
+void		freeGPHDUri(GPHDUri *uri);
 
-#endif	// _PXFURIPARSER_H_
+#endif							/* _PXFURIPARSER_H_ */

@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/functions.c,v 1.120 2008/01/01 19:45:49 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/functions.c,v 1.126 2008/08/25 22:42:32 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -22,13 +22,15 @@
 #include "executor/executor.h"          /* ExecutorStart, ExecutorRun, etc */
 #include "executor/functions.h"
 #include "funcapi.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 #include "catalog/namespace.h"
@@ -346,10 +348,11 @@ init_sql_fcache(FmgrInfo *finfo)
 	 * Functions use that type of SELECT to evaluate expressions, so without those,
 	 * no functions would be useful.
 	 * 
-	 * We also need to execute certain catalog queries locally.  The Fault-Tolerance system
-	 * does queries of gp_configuration, and some DDL and Utility commands do selects from the 
-	 * catalog table, etc.    So, if the FROM clause consists only of catalog tables, we 
-	 * will run the query locally.
+	 * We also need to execute certain catalog queries locally.  The
+	 * Fault-Tolerance system does queries of gp_segment_configuration, and
+	 * some DDL and Utility commands do selects from the catalog table, etc.
+	 * So, if the FROM clause consists only of catalog tables, we will run the
+	 * query locally.
 	 * 
 	 */
 	if (Gp_role == GP_ROLE_EXECUTE)
@@ -402,6 +405,7 @@ init_sql_fcache(FmgrInfo *finfo)
 	fcache->returnsTuple = check_sql_fn_retval(foid,
 											   rettype,
 											   queryTree_list,
+											   false,
 											   &fcache->junkFilter);
 
 	/* Finally, plan the queries */
@@ -572,20 +576,22 @@ postquel_end(execution_state *es)
 		saveActiveSnapshot = ActiveSnapshot;
 		PG_TRY();
 		{
+			Oid			relationOid = InvalidOid; 	/* relation that is modified */
+			AutoStatsCmdType cmdType = AUTOSTATS_CMDTYPE_SENTINEL; 	/* command type */
+
 			ActiveSnapshot = es->qd->snapshot;
 
 			if (es->qd->operation != CMD_SELECT)
 				AfterTriggerEndQuery(es->qd->estate);
+
+			if (Gp_role == GP_ROLE_DISPATCH)
+				autostats_get_cmdtype(es->qd, &cmdType, &relationOid);
+
 			ExecutorEnd(es->qd);
 
 			/* MPP-14001: Running auto_stats */
 			if (Gp_role == GP_ROLE_DISPATCH)
-			{
-				Oid			relationOid = InvalidOid; 					/* relation that is modified */
-				AutoStatsCmdType cmdType = AUTOSTATS_CMDTYPE_SENTINEL; 	/* command type */
-				autostats_get_cmdtype(es->qd, &cmdType, &relationOid);
 				auto_stats(cmdType, relationOid, es->qd->es_processed, true /* inFunction */);
-			}
 		}
 		PG_CATCH();
 		{
@@ -972,7 +978,7 @@ sql_exec_error_callback(void *arg)
 							  &isnull);
 		if (isnull)
 			elog(ERROR, "null prosrc");
-		prosrc = DatumGetCString(DirectFunctionCall1(textout, tmp));
+		prosrc = TextDatumGetCString(tmp);
 		errposition(0);
 		internalerrposition(syntaxerrposition);
 		internalerrquery(prosrc);
@@ -1053,7 +1059,9 @@ ShutdownSQLFunction(Datum arg)
  *
  * The return value of a sql function is the value returned by
  * the final query in the function.  We do some ad-hoc type checking here
- * to be sure that the user is returning the type he claims.
+ * to be sure that the user is returning the type he claims.  There are
+ * also a couple of strange-looking features to assist callers in dealing
+ * with allowed special cases, such as binary-compatible result types.
  *
  * For a polymorphic function the passed rettype must be the actual resolved
  * output type of the function; we should never see a polymorphic pseudotype
@@ -1065,6 +1073,10 @@ ShutdownSQLFunction(Datum arg)
  * allow "SELECT rowtype_expression", this may be false even when the declared
  * function return type is a rowtype.
  *
+ * If insertRelabels is true, then binary-compatible cases are dealt with
+ * by actually inserting RelabelType nodes into the final SELECT; obviously
+ * the caller must pass a parsetree that it's okay to modify in this case.
+ *
  * If junkFilter isn't NULL, then *junkFilter is set to a JunkFilter defined
  * to convert the function's tuple result to the correct output tuple type.
  * Whenever the result value is false (ie, the function isn't returning a
@@ -1072,6 +1084,7 @@ ShutdownSQLFunction(Datum arg)
  */
 bool
 check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
+					bool insertRelabels,
 					JunkFilter **junkFilter)
 {
 	Query	   *parse;
@@ -1142,10 +1155,12 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 		rettype == VOIDOID)
 	{
 		/*
-		 * For scalar-type returns, the target list should have exactly one
-		 * entry, and its type should agree with what the user declared. (As
-		 * of Postgres 7.2, we accept binary-compatible types too.)
+		 * For scalar-type returns, the target list must have exactly one
+		 * non-junk entry, and its type must agree with what the user
+		 * declared; except we allow binary-compatible types too.
 		 */
+		TargetEntry *tle;
+
 		if (tlistlen != 1)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
@@ -1153,7 +1168,11 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 					format_type_be(rettype)),
 				 errdetail("Final SELECT must return exactly one column.")));
 
-		restype = exprType((Node *) ((TargetEntry *) linitial(tlist))->expr);
+		/* We assume here that non-junk TLEs must come first in tlists */
+		tle = (TargetEntry *) linitial(tlist);
+		Assert(!tle->resjunk);
+
+		restype = exprType((Node *) tle->expr);
 		if (!IsBinaryCoercible(restype, rettype))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
@@ -1161,6 +1180,11 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 					format_type_be(rettype)),
 					 errdetail("Actual return type is %s.",
 							   format_type_be(restype))));
+		if (insertRelabels && restype != rettype)
+			tle->expr = (Expr *) makeRelabelType(tle->expr,
+												 rettype,
+												 -1,
+												 COERCE_DONTCARE);
 	}
 	else if (fn_typtype == TYPTYPE_COMPOSITE || rettype == RECORDOID)
 	{
@@ -1174,8 +1198,8 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 		 * If the target list is of length 1, and the type of the varnode in
 		 * the target list matches the declared return type, this is okay.
 		 * This can happen, for example, where the body of the function is
-		 * 'SELECT func2()', where func2 has the same return type as the
-		 * function that's calling it.
+		 * 'SELECT func2()', where func2 has the same composite return type
+		 * as the function that's calling it.
 		 *
 		 * XXX Note that if rettype is RECORD, the IsBinaryCoercible check
 		 * will succeed for any composite restype.  For the moment we rely on
@@ -1184,9 +1208,19 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 		 */
 		if (tlistlen == 1)
 		{
-			restype = exprType((Node *) ((TargetEntry *) linitial(tlist))->expr);
+			TargetEntry *tle = (TargetEntry *) linitial(tlist);
+
+			Assert(!tle->resjunk);
+			restype = exprType((Node *) tle->expr);
 			if (IsBinaryCoercible(restype, rettype))
+			{
+				if (insertRelabels && restype != rettype)
+					tle->expr = (Expr *) makeRelabelType(tle->expr,
+														 rettype,
+														 -1,
+														 COERCE_DONTCARE);
 				return false;	/* NOT returning whole tuple */
+			}
 		}
 
 		/* Is the rowtype fixed, or determined only at runtime? */
@@ -1245,6 +1279,11 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 								   format_type_be(tletype),
 								   format_type_be(atttype),
 								   tuplogcols)));
+			if (insertRelabels && tletype != atttype)
+				tle->expr = (Expr *) makeRelabelType(tle->expr,
+													 atttype,
+													 -1,
+													 COERCE_DONTCARE);
 		}
 
 		for (;;)
@@ -1271,14 +1310,6 @@ check_sql_fn_retval(Oid func_id, Oid rettype, List *queryTreeList,
 
 		/* Report that we are returning entire tuple result */
 		return true;
-	}
-	else if (IsPolymorphicType(rettype))
-	{
-		/* This should already have been caught ... */
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-				 errmsg("cannot determine result data type"),
-				 errdetail("A function returning a polymorphic type must have at least one polymorphic argument.")));
 	}
 	else
 		ereport(ERROR,

@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/storage/ipc/ipci.c,v 1.100 2009/05/05 19:59:00 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/storage/ipc/ipci.c,v 1.95 2008/03/16 19:47:33 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -60,8 +60,8 @@
 #include "utils/sharedsnapshot.h"
 #include "utils/simex.h"
 
-#include "gp-libpq-fe.h"
-#include "gp-libpq-int.h"
+#include "libpq-fe.h"
+#include "libpq-int.h"
 #include "cdb/cdbfts.h"
 #include "cdb/cdbtm.h"
 #include "utils/tqual.h"
@@ -325,9 +325,9 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 		Persistent_PostDTMRecv_ShmemInit();
 
 	/*
-	 * Set up resource schedular
+	 * Set up resource manager 
 	 */
-	InitResManager();
+	ResManagerShmemInit();
 
 	if (!IsUnderPostmaster)
 	{
@@ -417,11 +417,6 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 
 	if (gp_enable_resqueue_priority)
 		BackoffStateInit();
-	
-	if (!IsResManagerMemoryPolicyNone())
-	{
-		SPI_InitMemoryReservation();
-	}
 	
 	/*
 	 * Now give loadable modules a chance to set up their shmem allocations

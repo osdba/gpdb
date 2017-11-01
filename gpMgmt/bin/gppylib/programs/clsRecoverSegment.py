@@ -19,11 +19,12 @@
 # THIS IMPORT SHOULD COME FIRST
 from gppylib.mainUtils import *
 
-from optparse import Option, OptionGroup, OptionParser, OptionValueError, SUPPRESS_USAGE
-import os, sys, getopt, socket, StringIO, signal, time
-from gppylib import gparray, gplog, pgconf, userinput, utils
+from optparse import OptionGroup
+import os, sys, signal, time
+from gppylib import gparray, gplog, userinput, utils
 from gppylib.util import gp_utils
-from gppylib.commands import base, gp, pg, unix
+from gppylib.commands import gp, pg, unix
+from gppylib.commands.base import Command, WorkerPool
 from gppylib.db import dbconn
 from gppylib.gpparseopts import OptParser, OptChecker
 from gppylib.operations.startSegments import *
@@ -34,15 +35,13 @@ from gppylib.programs.clsAddMirrors import validateFlexibleHeadersListAllFilespa
 from gppylib.system import configurationInterface as configInterface
 from gppylib.system.environment import GpMasterEnvironment
 from gppylib.testold.testUtils import *
-from gppylib.parseutils import line_reader, parse_filespace_order, parse_gprecoverseg_line, \
-    canonicalize_address
+from gppylib.parseutils import line_reader, parse_filespace_order, parse_gprecoverseg_line, canonicalize_address
 from gppylib.utils import ParsedConfigFile, ParsedConfigFileRow, writeLinesToFile, \
-    normalizeAndValidateInputPath, TableLogger
+     normalizeAndValidateInputPath, TableLogger
 from gppylib.gphostcache import GpInterfaceToHostNameCache
 from gppylib.operations.utils import ParallelOperation
 from gppylib.operations.package import SyncPackages
-
-import gppylib.commands.gp
+from gppylib.heapchecksum import HeapChecksum
 
 logger = gplog.get_default_logger()
 
@@ -101,7 +100,7 @@ class PortAssigner:
 
 # -------------------------------------------------------------------------
 
-class RemoteQueryCommand(base.Command):
+class RemoteQueryCommand(Command):
     def __init__(self, qname, query, hostname, port, dbname=None):
         self.qname = qname
         self.query = query
@@ -226,8 +225,9 @@ class GpRecoverSegmentProgram:
                         #
                         # this could be an assertion -- configuration should not allow multiple entries!
                         #
-                        raise Exception(("A segment to recover was found twice in configuration.  " \
-                                         "This segment is described by address:port:directory '%s:%s:%s' on the input line: %s") %
+                        raise Exception(("A segment to recover was found twice in configuration.  "
+                                         "This segment is described by address:port:directory '%s:%s:%s' "
+                                         "on the input line: %s") %
                                         (failedAddress, failedPort, failedDataDirectory, row.getLine()))
                     failedSegment = segment
 
@@ -301,7 +301,7 @@ class GpRecoverSegmentProgram:
 
                 segs_in_change_tracking_disabled.append(peerForFailedSegmentDbId)
             else:
-                segs.append(GpMirrorToBuild(failedSegment, peerForFailedSegment, failoverSegments[index], \
+                segs.append(GpMirrorToBuild(failedSegment, peerForFailedSegment, failoverSegments[index],
                                             self.__options.forceFullResynchronization))
 
         self._output_segments_in_change_tracking_disabled(segs_in_change_tracking_disabled)
@@ -546,10 +546,13 @@ class GpRecoverSegmentProgram:
                              (', '.join(str(seg_id) for seg_id in segs_persistent_mirroring_disabled)))
 
     def is_segment_mirror_state_mismatched(self, gpArray, segment):
-        if gpArray.getFaultStrategy() == gparray.FAULT_STRATEGY_FILE_REPLICATION:  # Determines whether cluster has mirrors
+        if gpArray.hasMirrors:
+            # Determines whether cluster has mirrors
             with dbconn.connect(dbconn.DbURL()) as conn:
                 res = dbconn.execSQL(conn,
-                                     "SELECT mirror_existence_state from gp_dist_random('gp_persistent_relation_node') where gp_segment_id=%s group by 1;" % segment.getSegmentContentId()).fetchall()
+                                     "SELECT mirror_existence_state "
+                                     "from gp_dist_random('gp_persistent_relation_node') "
+                                     "where gp_segment_id=%s group by 1;" % segment.getSegmentContentId()).fetchall()
                 # For a mirrored system, there should not be any mirror_existance_state entries with no mirrors.
                 # If any exist, the segment contains a PT inconsistency.
                 for state in res:
@@ -994,7 +997,8 @@ class GpRecoverSegmentProgram:
         for item in self.__pool.getCompletedItems():
             res = item.get_results()
             if res:
-                self.logger.error('Persistent table check %s failed on host %s:%s.' % (item.qname, item.hostname, item.port))
+                self.logger.error(
+                    'Persistent table check %s failed on host %s:%s.' % (item.qname, item.hostname, item.port))
                 self.logger.debug('Result = %s' % res)
                 persistent_check_failed = True
 
@@ -1118,7 +1122,7 @@ class GpRecoverSegmentProgram:
             raise ProgramArgumentValidationException(
                 "Invalid parallelDegree provided with -B argument: %d" % self.__options.parallelDegree)
 
-        self.__pool = base.WorkerPool(self.__options.parallelDegree)
+        self.__pool = WorkerPool(self.__options.parallelDegree)
         gpEnv = GpMasterEnvironment(self.__options.masterDataDirectory, True)
 
         # verify "where to recover" options
@@ -1134,8 +1138,7 @@ class GpRecoverSegmentProgram:
         if self.__options.rebalanceSegments:
             optionCnt += 1
         if optionCnt > 1:
-            raise ProgramArgumentValidationException( \
-                "Only one of -i, -p, -s, -r, and -S may be specified")
+            raise ProgramArgumentValidationException("Only one of -i, -p, -s, -r, and -S may be specified")
 
         faultProberInterface.getFaultProber().initializeProber(gpEnv.getMasterPort())
 
@@ -1148,8 +1151,8 @@ class GpRecoverSegmentProgram:
 
         self.check_segment_state_ready_for_recovery(gpArray.getSegDbList(), gpArray.getSegDbMap())
 
-        if gpArray.getFaultStrategy() != gparray.FAULT_STRATEGY_FILE_REPLICATION:
-            raise ExceptionNoStackTraceNeeded( \
+        if not gpArray.hasMirrors:
+            raise ExceptionNoStackTraceNeeded(
                 'GPDB Mirroring replication is not configured for this Greenplum Database instance.')
 
         # We have phys-rep/filerep mirrors.
@@ -1213,10 +1216,13 @@ class GpRecoverSegmentProgram:
                     if not userinput.ask_yesno(None, "\nContinue with segment rebalance procedure", 'N'):
                         raise UserAbortedException()
 
-                mirrorBuilder.rebalance()
-
+                fullRebalanceDone = mirrorBuilder.rebalance()
                 self.logger.info("******************************************************************")
-                self.logger.info("The rebalance operation has completed successfully.")
+                if fullRebalanceDone:
+                    self.logger.info("The rebalance operation has completed successfully.")
+                else:
+                    self.logger.info("The rebalance operation has completed with WARNINGS."
+                                     " Please review the output in the gprecoverseg log.")
                 self.logger.info("There is a resynchronization running in the background to bring all")
                 self.logger.info("segments in sync.")
                 self.logger.info("")
@@ -1227,6 +1233,7 @@ class GpRecoverSegmentProgram:
             self.logger.info('No segments to recover')
         else:
             mirrorBuilder.checkForPortAndDirectoryConflicts(gpArray)
+            self.validate_heap_checksum_consistency(gpArray, mirrorBuilder)
 
             self.displayRecovery(mirrorBuilder, gpArray)
             self.__displayRecoveryWarnings(mirrorBuilder)
@@ -1241,7 +1248,8 @@ class GpRecoverSegmentProgram:
             if new_hosts:
                 self.syncPackages(new_hosts)
 
-            mirrorBuilder.buildMirrors("recover", gpEnv, gpArray)
+            if not mirrorBuilder.buildMirrors("recover", gpEnv, gpArray):
+                sys.exit(1)
 
             confProvider.sendPgElogFromMaster("Recovery of %d segment(s) has been started." % \
                                               len(mirrorBuilder.getMirrorsToBuild()), True)
@@ -1253,11 +1261,31 @@ class GpRecoverSegmentProgram:
             self.logger.info("Use  gpstate -s  to check the resynchronization progress.")
             self.logger.info("******************************************************************")
 
-        pidfile = os.path.join(gpEnv.getMasterDataDir(), 'gprecoverseg.pid')
-        if os.path.exists(pidfile):
-            os.remove(pidfile)
-        os._exit(0)
+        sys.exit(0)
 
+    def validate_heap_checksum_consistency(self, gpArray, mirrorBuilder):
+        live_segments = [target.getLiveSegment() for target in mirrorBuilder.getMirrorsToBuild()]
+        if len(live_segments) == 0:
+            self.logger.info("No checksum validation necessary when there are no segments to recover.")
+            return
+
+        heap_checksum = HeapChecksum(gpArray, num_workers=len(live_segments), logger=self.logger)
+        successes, failures = heap_checksum.get_segments_checksum_settings(live_segments)
+        # go forward if we have at least one segment that has replied
+        if len(successes) == 0:
+            raise Exception("No segments responded to ssh query for heap checksum validation.")
+        consistent, inconsistent, master_checksum_value = heap_checksum.check_segment_consistency(successes)
+        if len(inconsistent) > 0:
+            self.logger.fatal("Heap checksum setting differences reported on segments")
+            self.logger.fatal("Failed checksum consistency validation:")
+            for gpdb in inconsistent:
+                segment_name = gpdb.getSegmentHostName()
+                checksum = gpdb.heap_checksum
+                self.logger.fatal("%s checksum set to %s differs from master checksum set to %s" %
+                                  (segment_name, checksum, master_checksum_value))
+            raise Exception("Heap checksum setting differences reported on segments")
+        self.logger.info("Heap checksum setting is consistent between master and the segments that are candidates "
+                         "for recoverseg")
 
     def cleanup(self):
         if self.__pool:
@@ -1333,8 +1361,7 @@ class GpRecoverSegmentProgram:
     @staticmethod
     def createProgram(options, args):
         if len(args) > 0:
-            raise ProgramArgumentValidationException( \
-                "too many arguments: only options may be specified", True)
+            raise ProgramArgumentValidationException("too many arguments: only options may be specified", True)
         return GpRecoverSegmentProgram(options)
 
     @staticmethod

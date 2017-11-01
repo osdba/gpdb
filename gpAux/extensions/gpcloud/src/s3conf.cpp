@@ -70,7 +70,7 @@ S3Params InitConfig(const string& urlWithOptions) {
 
     S3Params params(sourceUrl, useHttps, version, urlRegion);
 
-    string sse_type = s3Cfg.Get(configSection, "server_side_encryption", "none");
+    string sse_type = s3Cfg.Get(configSection, "server_side_encryption", "");
     if (sse_type == "sse-s3") {
         params.setSSEType(SSE_S3);
     } else {
@@ -107,6 +107,8 @@ S3Params InitConfig(const string& urlWithOptions) {
 
     params.setProxy(s3Cfg.Get(configSection, "proxy", ""));
 
+    params.setGpcheckcloud_newline(s3Cfg.Get(configSection, "gpcheckcloud_newline", "\n"));
+
     params.setVerifyCert(verifyCert);
 
     CheckEssentialConfig(params);
@@ -125,5 +127,11 @@ void CheckEssentialConfig(const S3Params& params) {
 
     if (s3ext_segnum <= 0) {
         S3_CHECK_OR_DIE(false, S3ConfigError, "\"FATAL: segment info is invalid\"", "segment");
+    }
+
+    string newline = params.getGpcheckcloud_newline();
+    if (newline.compare("\n") && newline.compare("\r\n") && newline.compare("\r")) {
+        S3_CHECK_OR_DIE(false, S3ConfigError, "\"FATAL: gpcheckcloud_newline is invalid\"\"",
+                        "gpcheckcloud_newline");
     }
 }

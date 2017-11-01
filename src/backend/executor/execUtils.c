@@ -4,12 +4,13 @@
  *	  miscellaneous executor utility routines
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/execUtils.c,v 1.154 2008/01/01 19:45:49 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/execUtils.c,v 1.155 2008/03/26 21:10:38 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -52,9 +53,8 @@
 #include "parser/parsetree.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
-#include "utils/workfile_mgr.h"
+#include "utils/tqual.h"
 
-#include "cdb/cdbvars.h"
 #include "nodes/primnodes.h"
 #include "nodes/execnodes.h"
 
@@ -72,6 +72,9 @@
 #include "nodes/makefuncs.h"
 #include "storage/ipc.h"
 #include "cdb/cdbllize.h"
+#include "utils/workfile_mgr.h"
+
+#include "cdb/memquota.h"
 
 static void ShutdownExprContext(ExprContext *econtext);
 
@@ -2169,7 +2172,12 @@ uint64 PlanStateOperatorMemKB(const PlanState *ps)
 	}
 	else
 	{
-		result = ps->plan->operatorMemKB;
+		if (IsA(ps, AggState))
+		{
+			result = ps->plan->operatorMemKB + MemoryAccounting_RequestQuotaIncrease();
+		}
+		else
+			result = ps->plan->operatorMemKB;
 	}
 	
 	return result;
@@ -2573,12 +2581,12 @@ void AssertSliceTableIsValid(SliceTable *st, struct PlannedStmt *pstmt)
 
 	Assert(maxIndex == list_length(st->slices));
 
-	foreach (lc, st->slices)
+	foreach_with_count(lc, st->slices, i)
 	{
 		Slice *s = (Slice *) lfirst(lc);
 
 		/* The n-th slice entry has sliceIndex of n */
-		Assert(s->sliceIndex == i++ && "slice index incorrect");
+		Assert(s->sliceIndex == i && "slice index incorrect");
 
 		/* The root index of a slice is either 0 or is a slice corresponding to an init plan */
 		Assert((s->rootIndex == 0) || (s->rootIndex > st->nMotions && s->rootIndex < maxIndex));

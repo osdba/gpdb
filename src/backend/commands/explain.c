@@ -4,11 +4,12 @@
  *	  Explain query execution plans
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/explain.c,v 1.179 2008/10/04 21:56:52 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/explain.c,v 1.185 2009/04/05 19:59:39 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -36,9 +37,9 @@
 #include "utils/json.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"             /* AllocSetContextCreate() */
-#include "utils/resscheduler.h"
 #include "utils/tuplesort.h"
-#include "utils/tuplesort_mk.h"
+#include "utils/snapmgr.h"
+
 #include "cdb/cdbdisp.h"                /* CheckDispatchResult() */
 #include "cdb/cdbexplain.h"             /* cdbexplain_recvExecStats */
 #include "cdb/cdbpartition.h"
@@ -48,6 +49,7 @@
 #include "cdb/cdbpathlocus.h"
 #include "cdb/memquota.h"
 #include "miscadmin.h"
+#include "utils/resscheduler.h"
 
 #ifdef USE_ORCA
 extern char *SzDXLPlan(Query *parse);
@@ -99,7 +101,7 @@ static void explain_outNode(StringInfo str,
 				Plan *outer_plan, Plan *parentPlan,
 				int indent, ExplainState *es);
 static void show_scan_qual(List *qual, const char *qlabel,
-			   int scanrelid, Plan *outer_plan, Plan *inner_plan,
+			   int scanrelid, Plan *scan_plan, Plan *outer_plan,
 			   StringInfo str, int indent, ExplainState *es);
 static void show_upper_qual(List *qual, const char *qlabel, Plan *plan,
 				StringInfo str, int indent, ExplainState *es);
@@ -372,7 +374,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ParamListInfo params,
 	StringInfoData buf;
 	EState     *estate = NULL;
 	int			eflags;
-	int         nb;
+	char	   *settings;
 	MemoryContext explaincxt = CurrentMemoryContext;
 
 	/*
@@ -650,13 +652,10 @@ ExplainOnePlan(PlannedStmt *plannedstmt, ParamListInfo params,
     /*
      * Show non-default GUC settings that might have affected the plan.
      */
-    nb = gp_guc_list_show(&buf, "Settings:  ", "%s=%s; ", PGC_S_DEFAULT,
-                           gp_guc_list_for_explain);
-    if (nb > 0)
-    {
-        truncateStringInfo(&buf, buf.len - 2);  /* drop final "; " */
-        appendStringInfoChar(&buf, '\n');
-    }
+	settings = gp_guc_list_show(PGC_S_DEFAULT, gp_guc_list_for_explain);
+	if (*settings)
+		appendStringInfo(&buf, "Settings:  %s\n", settings);
+	pfree(settings);
 
     /* Display optimizer status: either 'legacy query optimizer' or Orca version number */
 	appendStringInfo(&buf, "Optimizer status: ");
@@ -962,11 +961,11 @@ explain_outNode(StringInfo str,
 				case JOIN_RIGHT:
 					pname = "Nested Loop Right Join";
 					break;
-				case JOIN_IN:
-					pname = "Nested Loop EXISTS Join";
+				case JOIN_SEMI:
+					pname = "Nested Loop Semi Join";
 					break;
-				case JOIN_LASJ:
-					pname = "Nested Loop Left Anti Semi Join";
+				case JOIN_ANTI:
+					pname = "Nested Loop Anti Join";
 					break;
 				case JOIN_LASJ_NOTIN:
 					pname = "Nested Loop Left Anti Semi Join (Not-In)";
@@ -991,11 +990,11 @@ explain_outNode(StringInfo str,
 				case JOIN_RIGHT:
 					pname = "Merge Right Join";
 					break;
-				case JOIN_IN:
-					pname = "Merge EXISTS Join";
+				case JOIN_SEMI:
+					pname = "Merge Semi Join";
 					break;
-				case JOIN_LASJ:
-					pname = "Merge Left Anti Semi Join";
+				case JOIN_ANTI:
+					pname = "Merge Anti Join";
 					break;
 				case JOIN_LASJ_NOTIN:
 					pname = "Merge Left Anti Semi Join (Not-In)";
@@ -1020,11 +1019,11 @@ explain_outNode(StringInfo str,
 				case JOIN_RIGHT:
 					pname = "Hash Right Join";
 					break;
-				case JOIN_IN:
-					pname = "Hash EXISTS Join";
+				case JOIN_SEMI:
+					pname = "Hash Semi Join";
 					break;
-				case JOIN_LASJ:
-					pname = "Hash Left Anti Semi Join";
+				case JOIN_ANTI:
+					pname = "Hash Anti Join";
 					break;
 				case JOIN_LASJ_NOTIN:
 					pname = "Hash Left Anti Semi Join (Not-In)";
@@ -1122,8 +1121,8 @@ explain_outNode(StringInfo str,
 					break;
 			}
 			break;
-		case T_Window:
-			pname = "Window";
+		case T_WindowAgg:
+			pname = "WindowAgg";
 			break;
 		case T_TableFunctionScan:
 			pname = "Table Function Scan";
@@ -1168,7 +1167,7 @@ explain_outNode(StringInfo str,
 
 				/* scale the number of rows by the number of segments sending data */
 				scaleFactor = nSenders;
-				
+
 				switch (pMotion->motionType)
 				{
 					case MOTIONTYPE_HASH:
@@ -1310,8 +1309,8 @@ explain_outNode(StringInfo str,
 				/* Get the range table, it should be a TableFunction */
 				rte = rt_fetch(((Scan *) plan)->scanrelid, es->rtable);
 				Assert(rte->rtekind == RTE_TABLEFUNCTION);
-				
-				/* 
+
+				/*
 				 * Lookup the function name.
 				 *
 				 * Unlike RTE_FUNCTION there should be no cases where the
@@ -1326,9 +1325,9 @@ explain_outNode(StringInfo str,
 				if (strcmp(rte->eref->aliasname, proname) != 0)
 					appendStringInfo(str, " %s",
 									 quote_identifier(rte->eref->aliasname));
-				
+
 				/* might be nice to add order by and scatter by info */
-				
+
 			}
 			break;
 		case T_FunctionScan:
@@ -1457,19 +1456,19 @@ explain_outNode(StringInfo str,
 			show_scan_qual(((IndexScan *) plan)->indexqualorig,
 						   "Index Cond",
 						   ((Scan *) plan)->scanrelid,
-						   outer_plan, NULL,
+						   plan, outer_plan,
 						   str, indent, es);
 			show_scan_qual(plan->qual,
 						   "Filter",
 						   ((Scan *) plan)->scanrelid,
-						   outer_plan, NULL,
+						   plan, outer_plan,
 						   str, indent, es);
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
 						   "Index Cond",
 						   ((Scan *) plan)->scanrelid,
-						   outer_plan, NULL,
+						   plan, outer_plan,
 						   str, indent, es);
 			break;
 		case T_BitmapHeapScan:
@@ -1481,7 +1480,7 @@ explain_outNode(StringInfo str,
 				show_scan_qual(((BitmapHeapScan *) plan)->bitmapqualorig,
 							   "Recheck Cond",
 							   ((Scan *) plan)->scanrelid,
-							   outer_plan, NULL,
+							   plan, outer_plan,
 							   str, indent, es);
 			}
 			else if (nodeTag(plan) == T_BitmapAppendOnlyScan)
@@ -1489,7 +1488,7 @@ explain_outNode(StringInfo str,
 				show_scan_qual(((BitmapAppendOnlyScan *) plan)->bitmapqualorig,
 							   "Recheck Cond",
 							   ((Scan *) plan)->scanrelid,
-							   outer_plan, NULL,
+							   plan, outer_plan,
 							   str, indent, es);
 			}
 			else if (nodeTag(plan) == T_BitmapTableScan)
@@ -1497,7 +1496,7 @@ explain_outNode(StringInfo str,
 				show_scan_qual(((BitmapTableScan *) plan)->bitmapqualorig,
 							   "Recheck Cond",
 							   ((Scan *) plan)->scanrelid,
-							   outer_plan, NULL,
+							   plan, outer_plan,
 							   str, indent, es);
 			}
 			/* FALL THRU */
@@ -1514,15 +1513,14 @@ explain_outNode(StringInfo str,
 			show_scan_qual(plan->qual,
 						   "Filter",
 						   ((Scan *) plan)->scanrelid,
-						   outer_plan, NULL,
+						   plan, outer_plan,
 						   str, indent, es);
 			break;
 		case T_SubqueryScan:
 			show_scan_qual(plan->qual,
 						   "Filter",
 						   ((Scan *) plan)->scanrelid,
-						   outer_plan,
-						   ((SubqueryScan *) plan)->subplan,
+						   plan, outer_plan,
 						   str, indent, es);
 			break;
 		case T_TidScan:
@@ -1538,12 +1536,12 @@ explain_outNode(StringInfo str,
 				show_scan_qual(tidquals,
 							   "TID Cond",
 							   ((Scan *) plan)->scanrelid,
-							   outer_plan, NULL,
+							   plan, outer_plan,
 							   str, indent, es);
 				show_scan_qual(plan->qual,
 							   "Filter",
 							   ((Scan *) plan)->scanrelid,
-							   outer_plan, NULL,
+							   plan, outer_plan,
 							   str, indent, es);
 			}
 			break;
@@ -1597,44 +1595,24 @@ explain_outNode(StringInfo str,
 						       "Group By",
 						       str, indent, es);
 			break;
-		case T_Window:
+		case T_WindowAgg:
 			{
-				Window *window = (Window *)plan;
-				ListCell *cell;
-				char orderKeyStr[32]; /* XXX big enough */
-				int i;
+				WindowAgg *window = (WindowAgg *) plan;
 
-				if ( window->numPartCols > 0 )
+				if ( window->partNumCols > 0 )
 				{
 					show_grouping_keys(plan,
-									   window->numPartCols,
+									   window->partNumCols,
 									   window->partColIdx,
 									   "Partition By",
 									   str, indent, es);
 				}
 
-				if (list_length(window->windowKeys) > 1)
-					i = 0;
-				else
-					i = -1;
-
-				foreach(cell, window->windowKeys)
-				{
-					WindowKey *key = (WindowKey *) lfirst(cell);
-
-					if ( i < 0 )
-						sprintf(orderKeyStr, "Order By");
-					else
-					{
-						sprintf(orderKeyStr, "Order By (level %d)", ++i);
-					}
-
-					show_sort_keys(outerPlan(plan),
-								   key->numSortCols,
-								   key->sortColIdx,
-								   orderKeyStr,
-								   str, indent, es);
-				}
+				show_sort_keys(outerPlan(plan),
+							   window->ordNumCols,
+							   window->ordColIdx,
+							   "Order By",
+							   str, indent, es);
 				/* XXX don't show framing for now */
 			}
 			break;
@@ -1647,7 +1625,7 @@ explain_outNode(StringInfo str,
 						   str, indent, es);
 
 			/* Partitioning and ordering information */
-			
+
 		}
 		break;
 
@@ -1745,7 +1723,7 @@ explain_outNode(StringInfo str,
             SliceTable *sliceTable = planstate->state->es_sliceTable;
 
 			appendStringInfoFill(str, 2*indent, ' ');
-		    appendStringInfoString(str, "  InitPlan");
+			appendStringInfo(str, "  %s", sp->plan_name);
 
             /* Subplan might have its own root slice */
             if (sliceTable &&
@@ -1862,7 +1840,7 @@ explain_outNode(StringInfo str,
 
 			for (i = 0; i < indent; i++)
 				appendStringInfo(str, "  ");
-			
+
 			appendStringInfo(str, "  ->  ");
 
 			explain_outNode(str, subnode,
@@ -1954,7 +1932,6 @@ explain_outNode(StringInfo str,
 			for (i = 0; i < indent; i++)
 				appendStringInfo(str, "  ");
 			appendStringInfo(str, "  %s\n", sp->plan_name);
-
 			for (i = 0; i < indent; i++)
 				appendStringInfo(str, "  ");
 			appendStringInfo(str, "    ->  ");
@@ -1973,12 +1950,11 @@ explain_outNode(StringInfo str,
  * Show a qualifier expression for a scan plan node
  *
  * Note: outer_plan is the referent for any OUTER vars in the scan qual;
- * this would be the outer side of a nestloop plan.  inner_plan should be
- * NULL except for a SubqueryScan plan node, where it should be the subplan.
+ * this would be the outer side of a nestloop plan.  Pass NULL if none.
  */
 static void
 show_scan_qual(List *qual, const char *qlabel,
-			   int scanrelid, Plan *outer_plan, Plan *inner_plan,
+			   int scanrelid, Plan *scan_plan, Plan *outer_plan,
 			   StringInfo str, int indent, ExplainState *es)
 {
 	List	   *context;
@@ -1995,10 +1971,11 @@ show_scan_qual(List *qual, const char *qlabel,
 	node = (Node *) make_ands_explicit(qual);
 
 	/* Set up deparsing context */
-	context = deparse_context_for_plan((Node *) outer_plan,
-									   (Node *) inner_plan,
-									   es->rtable);
-	useprefix = (outer_plan != NULL || inner_plan != NULL);
+	context = deparse_context_for_plan((Node *) scan_plan,
+									   (Node *) outer_plan,
+									   es->rtable,
+									   es->pstmt->subplans);
+	useprefix = (outer_plan != NULL || IsA(scan_plan, SubqueryScan));
 
 	/* Deparse the expression */
 	exprstr = deparse_expr_sweet(node, context, useprefix, false);
@@ -2027,9 +2004,10 @@ show_upper_qual(List *qual, const char *qlabel, Plan *plan,
 		return;
 
 	/* Set up deparsing context */
-	context = deparse_context_for_plan((Node *) outerPlan(plan),
-									   (Node *) innerPlan(plan),
-									   es->rtable);
+	context = deparse_context_for_plan((Node *) plan,
+									   NULL,
+									   es->rtable,
+									   es->pstmt->subplans);
 	useprefix = list_length(es->rtable) > 1;
 
 	/* Deparse the expression */
@@ -2069,7 +2047,6 @@ show_grouping_keys(Plan        *plan,
     appendStringInfo(str, "  %s: ", qlabel);
 
     Node *outerPlan = (Node *) outerPlan(subplan);
-    Node *innerPlan = (Node *) innerPlan(subplan);
 
 	/*
 	 * Dig the child nodes of the subplan. This logic should match that in
@@ -2081,9 +2058,10 @@ show_grouping_keys(Plan        *plan,
 		outerPlan = (Node *) llast(((Sequence *) subplan)->subplans);
 
 	/* Set up deparse context */
-	context = deparse_context_for_plan(outerPlan,
-									   innerPlan,
-										   es->rtable);
+	context = deparse_context_for_plan((Node *) subplan,
+									   outerPlan,
+									   es->rtable,
+									   es->pstmt->subplans);
 
 	if (IsA(plan, Agg))
 	{
@@ -2157,9 +2135,10 @@ show_sort_keys(Plan *sortplan, int nkeys, AttrNumber *keycols,
 	appendStringInfo(str, "  %s: ", qlabel);
 
 	/* Set up deparsing context */
-	context = deparse_context_for_plan((Node *) outerPlan(sortplan),
-									   NULL,	/* Sort has no innerPlan */
-									   es->rtable);
+	context = deparse_context_for_plan((Node *) sortplan,
+									   NULL,
+									   es->rtable,
+									   es->pstmt->subplans);
 	useprefix = list_length(es->rtable) > 1;
 
 	for (keyno = 0; keyno < nkeys; keyno++)
@@ -2201,9 +2180,9 @@ show_motion_keys(Plan *plan, List *hashExpr, int nkeys, AttrNumber *keycols,
 		return;
 
 	/* Set up deparse context */
-	context = deparse_context_for_plan((Node *) outerPlan(plan),
-									   NULL,	/* Motion has no innerPlan */
-									   es->rtable);
+	context = deparse_context_for_plan((Node *) plan, (Node *) outerPlan(plan),
+									   es->rtable,
+									   es->pstmt->subplans);
 
     /* Merge Receive ordering key */
     if (nkeys > 0)
@@ -2268,8 +2247,9 @@ explain_partition_selector(PartitionSelector *ps, Plan *parent,
 
 		/* Set up deparsing context */
 		context = deparse_context_for_plan((Node *) parent,
-										   (Node *) parent,
-										   es->rtable);
+										   (Node *) outerPlan(parent),
+										   es->rtable,
+										   es->pstmt->subplans);
 		useprefix = list_length(es->rtable) > 1;
 
 		/* Deparse the expression */

@@ -10,7 +10,7 @@
  * Portions Copyright (c) 1996-2010, PostgreSQL Global Development Group
  * Portions Copyright (c) 1995, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/postgres.h,v 1.88 2008/01/01 19:45:56 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/postgres.h,v 1.89 2008/03/27 03:57:34 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -359,8 +359,19 @@ static inline Datum TransactionIdGetDatum(TransactionId tid) { return (Datum) ti
 static inline CommandId DatumGetCommandId(Datum d) { return (CommandId) d; } 
 static inline Datum CommandIdGetDatum(CommandId cid) { return (Datum) cid; } 
 
-static inline void *DatumGetPointer(Datum d) { Datum_U du; du.d = d; return du.ptr; }
-static inline Datum PointerGetDatum(const void *p) { Datum_U du; du.d = 0; du.ptr = (void *)p; return du.d; }
+/*
+ * DatumGetPointer
+ *		Returns pointer value of a datum.
+ */
+
+#define DatumGetPointer(X) ((Pointer) (X))
+
+/*
+ * PointerGetDatum
+ *		Returns datum representation for a pointer.
+ */
+
+#define PointerGetDatum(X) ((Datum) (X))
 
 static inline char *DatumGetCString(Datum d) { return (char* ) DatumGetPointer(d); } 
 static inline Datum CStringGetDatum(const char *p) { return PointerGetDatum(p); }

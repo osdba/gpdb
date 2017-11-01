@@ -7,7 +7,7 @@
  * Copyright (c) 2002-2008, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/fmgr/funcapi.c,v 1.37.2.2 2008/11/30 18:49:42 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/fmgr/funcapi.c,v 1.42 2008/08/25 22:42:34 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -19,8 +19,8 @@
 #include "catalog/pg_type.h"
 #include "executor/executor.h"          /* ReturnSetInfo, RegisterExprContextCallback */
 #include "funcapi.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -193,7 +193,7 @@ shutdown_MultiFuncCall(Datum arg)
  *		it is supposed to return.  If resultTypeId isn't NULL, *resultTypeId
  *		receives the actual datatype OID (this is mainly useful for scalar
  *		result types).	If resultTupleDesc isn't NULL, *resultTupleDesc
- *		receives a pointer to a TupleDesc when the result is of a composite
+ *		receives a pointer to a TupleDesc when the result is of a composit//
  *		type, or NULL when it's a scalar result.
  *
  * One hard case that this handles is resolution of actual rowtypes for
@@ -776,8 +776,7 @@ get_func_arg_info(HeapTuple procTup,
 			elog(ERROR, "proargnames must have the same number of elements as the function has arguments");
 		*p_argnames = (char **) palloc(sizeof(char *) * numargs);
 		for (i = 0; i < numargs; i++)
-			(*p_argnames)[i] = DatumGetCString(DirectFunctionCall1(textout,
-																   elems[i]));
+			(*p_argnames)[i] = TextDatumGetCString(elems[i]);
 	}
 
 	/* Get argument modes, if available */
@@ -892,8 +891,7 @@ get_func_result_name(Oid functionId)
 				result = NULL;
 				break;
 			}
-			result = DatumGetCString(DirectFunctionCall1(textout,
-														 argnames[i]));
+			result = TextDatumGetCString(argnames[i]);
 			if (result == NULL || result[0] == '\0')
 			{
 				/* Parameter is not named, so forget it */
@@ -1049,7 +1047,7 @@ build_function_result_tupdesc_d(Datum proallargtypes,
 			case PROARGMODE_TABLE:
 				outargtypes[numoutargs] = argtypes[i];
 				if (argnames)
-					pname = DatumGetCString(DirectFunctionCall1(textout, argnames[i]));
+					pname = TextDatumGetCString(argnames[i]);
 				else
 					pname = NULL;
 				if (pname == NULL || pname[0] == '\0')

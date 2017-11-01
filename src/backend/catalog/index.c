@@ -4,12 +4,13 @@
  *	  code to create and destroy POSTGRES index relations
  *
  * Portions Copyright (c) 2006-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/catalog/index.c,v 1.292.2.3 2009/12/09 21:58:16 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/catalog/index.c,v 1.303 2008/08/25 22:42:32 tgl Exp $
  *
  *
  * INTERFACE ROUTINES
@@ -47,8 +48,9 @@
 #include "commands/tablecmds.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
-#include "parser/parse_expr.h"
+#include "optimizer/var.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -60,8 +62,8 @@
 #include "utils/relcache.h"
 #include "utils/syscache.h"
 #include "utils/tuplesort.h"
-#include "utils/tuplesort_mk.h"
-#include "utils/faultinjector.h"
+#include "utils/snapmgr.h"
+#include "utils/tqual.h"
 
 #include "cdb/cdbappendonlyam.h"
 #include "cdb/cdbaocsam.h"
@@ -69,6 +71,7 @@
 #include "cdb/cdboidsync.h"
 #include "cdb/cdbmirroredfilesysobj.h"
 #include "cdb/cdbpersistentfilesysobj.h"
+#include "utils/faultinjector.h"
 
 /* state info for validate_index bulkdelete callback */
 typedef struct
@@ -1528,7 +1531,17 @@ setNewRelfilenode(Relation relation, TransactionId freezeXid)
 	rd_rel->relfilenode = newrelfilenode;
 	rd_rel->relpages = 0;		/* it's empty until further notice */
 	rd_rel->reltuples = 0;
-	rd_rel->relfrozenxid = freezeXid;
+	if (should_have_valid_relfrozenxid(HeapTupleGetOid(tuple),
+									   rd_rel->relkind,
+									   rd_rel->relstorage))
+	{
+		rd_rel->relfrozenxid = freezeXid;
+	}
+	else
+	{
+		rd_rel->relfrozenxid = InvalidTransactionId;
+	}
+
 	simple_heap_update(pg_class, &tuple->t_self, tuple);
 	CatalogUpdateIndexes(pg_class, tuple);
 
@@ -2527,33 +2540,19 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	ivinfo.message_level = DEBUG2;
 	ivinfo.num_heap_tuples = -1;
 	ivinfo.strategy = NULL;
-	state.tuplesort = NULL;
 
-	if(gp_enable_mk_sort)
-		state.tuplesort = tuplesort_begin_datum_mk(NULL,
-												   TIDOID,
-												   TIDLessOperator, false,
-												   maintenance_work_mem,
-												   false);
-	else
-		state.tuplesort = tuplesort_begin_datum(TIDOID,
-												TIDLessOperator, false,
-												maintenance_work_mem,
-												false);
+	state.tuplesort = tuplesort_begin_datum(NULL,
+											TIDOID,
+											TIDLessOperator, false,
+											maintenance_work_mem,
+											false);
 	state.htups = state.itups = state.tups_inserted = 0;
 
 	(void) index_bulk_delete(&ivinfo, NULL,
 							 validate_index_callback, (void *) &state);
 
 	/* Execute the sort */
-	if(gp_enable_mk_sort)
-	{
-		tuplesort_performsort_mk((Tuplesortstate_mk *)state.tuplesort);
-	}
-	else
-	{
-		tuplesort_performsort((Tuplesortstate *) state.tuplesort);
-	}
+	tuplesort_performsort(state.tuplesort);
 
 	/*
 	 * Now scan the heap and "merge" it with the index
@@ -2565,14 +2564,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 							&state);
 
 	/* Done with tuplesort object */
-	if(gp_enable_mk_sort)
-	{
-		tuplesort_end_mk((Tuplesortstate_mk *)state.tuplesort);
-	}
-	else
-	{
-		tuplesort_end((Tuplesortstate *) state.tuplesort);
-	}
+	tuplesort_end(state.tuplesort);
 
 	elog(DEBUG2,
 		 "validate_index found %.0f heap tuples, %.0f index tuples; inserted %.0f missing tuples",
@@ -2597,10 +2589,7 @@ validate_index_callback(ItemPointer itemptr, void *opaque)
 {
 	v_i_state  *state = (v_i_state *) opaque;
 
-	if(gp_enable_mk_sort)
-		tuplesort_putdatum_mk((Tuplesortstate_mk *) state->tuplesort, PointerGetDatum(itemptr), false);
-	else
-		tuplesort_putdatum((Tuplesortstate *) state->tuplesort, PointerGetDatum(itemptr), false);
+	tuplesort_putdatum(state->tuplesort, PointerGetDatum(itemptr), false);
 
 	state->itups += 1;
 	return false;				/* never actually delete anything */
@@ -2749,12 +2738,8 @@ validate_index_heapscan(Relation heapRelation,
 				pfree(indexcursor);
 			}
 
-			if (gp_enable_mk_sort)
-				tuplesort_empty = !tuplesort_getdatum_mk((Tuplesortstate_mk *) state->tuplesort,
-						true, &ts_val, &ts_isnull);
-			else
-				tuplesort_empty = !tuplesort_getdatum((Tuplesortstate *) state->tuplesort,
-						true, &ts_val, &ts_isnull);
+			tuplesort_empty = !tuplesort_getdatum(state->tuplesort,
+												  true, &ts_val, &ts_isnull);
 			Assert(tuplesort_empty || !ts_isnull);
 			indexcursor = (ItemPointer) DatumGetPointer(ts_val);
 		}

@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/parser/parse_node.c,v 1.99 2008/01/01 19:45:51 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/parser/parse_node.c,v 1.101 2008/08/25 22:42:33 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -18,6 +18,7 @@
 #include "catalog/pg_type.h"
 #include "mb/pg_wchar.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_expr.h"
@@ -28,7 +29,9 @@
 #include "utils/syscache.h"
 #include "utils/varbit.h"
 
+
 static void pcb_error_callback(void *arg);
+
 
 /*
  * make_parsestate
@@ -45,9 +48,6 @@ make_parsestate(ParseState *parentParseState)
 
 	pstate->parentParseState = parentParseState;
 
-	/* disable propagateSetopTypes by default */
-	pstate->p_propagateSetopTypes = false;
-
 	/* Fill in fields that don't start at null/false/zero */
 	pstate->p_next_resno = 1;
 
@@ -55,11 +55,6 @@ make_parsestate(ParseState *parentParseState)
 	{
 		pstate->p_sourcetext = parentParseState->p_sourcetext;
 		pstate->p_variableparams = parentParseState->p_variableparams;
-		if (parentParseState->p_propagateSetopTypes)
-		{
-			pstate->p_setopTypes = parentParseState->p_setopTypes;
-			pstate->p_setopTypmods = parentParseState->p_setopTypmods;
-		}
 	}
 
 	return pstate;
@@ -158,6 +153,7 @@ parser_errposition(ParseState *pstate, int location)
 	return errposition(pos);
 }
 
+
 /*
  * setup_parser_errposition_callback
  *		Arrange for non-parser errors to report an error position
@@ -212,6 +208,7 @@ pcb_error_callback(void *arg)
 	if (geterrcode() != ERRCODE_QUERY_CANCELED)
 		(void) parser_errposition(pcbstate->pstate, pcbstate->location);
 }
+
 
 /*
  * make_var
@@ -517,7 +514,6 @@ make_const(ParseState *pstate, Value *value, int location)
 			break;
 
 		case T_BitString:
-
 			/* arrange to report location if bit_in() fails */
 			setup_parser_errposition_callback(&pcbstate, pstate, location);
 			val = DirectFunctionCall3(bit_in,

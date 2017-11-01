@@ -7,11 +7,12 @@
  *	  pg_shadow and pg_group are now publicly accessible views on pg_authid.
  *
  *
- * Copyright (c) 2006-2010, Greenplum inc.
+ * Portions Copyright (c) 2006-2010, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/catalog/pg_authid.h,v 1.7 2008/01/01 19:45:56 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/catalog/pg_authid.h,v 1.8 2008/03/27 03:57:34 tgl Exp $
  *
  * NOTES
  *	  the genbki.sh script reads this file and generates .bki
@@ -30,10 +31,10 @@
  * the C header files define this type as TimestampTz.	Since the field is
  * potentially-null and therefore cannot be accessed directly from C code,
  * there is no particular need for the C struct definition to show the
- * field type as TimestampTz --- instead we just make it Datum.
+ * field type as TimestampTz --- instead we just make it int.
  */
+#define timestamptz int
 
-#define timestamptz Datum
 
 /* ----------------
  *		pg_authid definition.  cpp turns this into
@@ -44,22 +45,21 @@
 
 CATALOG(pg_authid,1260) BKI_SHARED_RELATION
 {
-	NameData	rolname;			/* name of role   */
-	bool		rolsuper;			/* read this field via superuser() only!  */
-	bool		rolinherit;			/* inherit privileges from other roles?  */
-	bool		rolcreaterole;		/* allowed to create more roles?  */
-	bool		rolcreatedb;		/* allowed to create databases?  */
-	bool		rolcatupdate;		/* allowed to alter catalogs manually?  */
-	bool		rolcanlogin;		/* allowed to log in as session user?  */
-	int4		rolconnlimit;		/* max connections allowed (-1=no limit)  */
+	NameData	rolname;		/* name of role */
+	bool		rolsuper;		/* read this field via superuser() only! */
+	bool		rolinherit;		/* inherit privileges from other roles? */
+	bool		rolcreaterole;	/* allowed to create more roles? */
+	bool		rolcreatedb;	/* allowed to create databases? */
+	bool		rolcatupdate;	/* allowed to alter catalogs manually? */
+	bool		rolcanlogin;	/* allowed to log in as session user? */
+	int4		rolconnlimit;	/* max connections allowed (-1=no limit) */
 
-
-	/* remaining fields may be null. use heap_getattr to read them!  */
-	text		rolpassword;		/* password, if any  */
-	timestamptz	rolvaliduntil;		/* password expiration time, if any */
-	text		rolconfig[1];		/* GUC settings to apply at login  */
-	Oid			rolresqueue;		/* ID of resource queue for this role  */
+	/* remaining fields may be null; use heap_getattr to read them! */
+	text		rolpassword;	/* password, if any */
+	timestamptz rolvaliduntil;	/* password expiration time, if any */
+	text		rolconfig[1];	/* GUC settings to apply at login */
 	/* GP added fields */
+	Oid			rolresqueue;	/* ID of resource queue for this role */
 	bool		rolcreaterextgpfd;	/* allowed to create readable gpfdist tbl?  */
 	bool		rolcreaterexthttp;	/* allowed to create readable http tbl?  */
 	bool		rolcreatewextgpfd;	/* allowed to create writable gpfdist tbl?  */

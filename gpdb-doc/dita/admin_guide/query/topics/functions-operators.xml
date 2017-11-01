@@ -2,6 +2,8 @@
 <!DOCTYPE topic PUBLIC "-//OASIS//DTD DITA Composite//EN" "ditabase.dtd">
 <topic id="topic26" xml:lang="en">
     <title id="in151167">Using Functions and Operators</title>
+    <shortdesc>Description of user-defined and built-in functions and operators in Greenplum
+        Database.</shortdesc>
     <body>
         <ul>
             <li id="in140953">
@@ -64,7 +66,6 @@
                             <entry colname="col2">Restricted</entry>
                             <entry colname="col3">Function values can change within a single table
                                 scan. For example: <codeph>random()</codeph>,
-                                    <codeph>currval()</codeph>,
                                 <codeph>timeofday()</codeph>.</entry>
                             <entry colname="col4">Any function with side effects is volatile, even
                                 if its result is predictable. For example:
@@ -322,8 +323,7 @@ SELECT foo();
                                     <ph>Sequence Manipulation Functions</ph>
                                 </xref>
                             </entry>
-                            <entry colname="col2"
-                                >currval<p>lastval</p><p>nextval</p><p>setval</p></entry>
+                            <entry colname="col2">nextval()<p>setval()</p></entry>
                             <entry colname="col3"/>
                             <entry colname="col4"/>
                         </row>

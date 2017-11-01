@@ -4,12 +4,13 @@
  *	  Commands for creating and altering table structures and settings
  *
  * Portions Copyright (c) 2005-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/tablecmds.c,v 1.215 2007/02/16 22:04:02 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/tablecmds.c,v 1.263 2008/08/25 22:42:32 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -39,8 +40,9 @@
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_trigger.h"
-#include "catalog/pg_type.h"
 #include "catalog/pg_tablespace.h"
+#include "catalog/pg_type.h"
+#include "catalog/pg_type_fn.h"
 #include "catalog/pg_partition.h"
 #include "catalog/pg_partition_rule.h"
 #include "catalog/toasting.h"
@@ -57,6 +59,7 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "optimizer/clauses.h"
 #include "optimizer/plancat.h"
@@ -87,7 +90,9 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tqual.h"
 
 #include "cdb/cdbdisp.h"
 #include "cdb/cdbdisp_query.h"
@@ -214,6 +219,7 @@ static void validateForeignKeyConstraint(FkConstraint *fkconstraint,
 static void createForeignKeyTriggers(Relation rel, FkConstraint *fkconstraint,
 						 Oid constraintOid);
 static void ATController(Relation rel, List *cmds, bool recurse);
+static void prepSplitCmd(Relation rel, PgPartRule *prule, bool is_at);
 static void ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 		  bool recurse, bool recursing);
 static void ATRewriteCatalogs(List **wqueue);
@@ -1078,6 +1084,9 @@ ExecuteTruncate(TruncateStmt *stmt)
 	List	   *rels = NIL;
 	List	   *relids = NIL;
 	List	   *meta_relids = NIL;
+	EState	   *estate;
+	ResultRelInfo *resultRelInfos;
+	ResultRelInfo *resultRelInfo;
 	ListCell   *cell;
     int partcheck = 2;
 	List *partList = NIL;
@@ -1137,9 +1146,11 @@ ExecuteTruncate(TruncateStmt *stmt)
 					cell = lnext(cell);
 					rel = heap_openrv(rv, AccessExclusiveLock);
 					if (RelationIsExternal(rel))
-					{
-						elog(ERROR, "Cannot truncate table having external partition:\"%s\".", RelationGetRelationName(rel));
-					}
+						ereport(ERROR,
+								(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+								 errmsg("cannot truncate table having external partition: \"%s\"",
+									    RelationGetRelationName(rel))));
+
 					heap_close(rel, NoLock);
 				}
 			}
@@ -1216,6 +1227,45 @@ ExecuteTruncate(TruncateStmt *stmt)
 		heap_truncate_check_FKs(rels, false);
 #endif
 
+	/* Prepare to catch AFTER triggers. */
+	AfterTriggerBeginQuery();
+
+	/*
+	 * To fire triggers, we'll need an EState as well as a ResultRelInfo
+	 * for each relation.
+	 */
+	estate = CreateExecutorState();
+	resultRelInfos = (ResultRelInfo *)
+		palloc(list_length(rels) * sizeof(ResultRelInfo));
+	resultRelInfo = resultRelInfos;
+	foreach(cell, rels)
+	{
+		Relation	rel = (Relation) lfirst(cell);
+
+		InitResultRelInfo(resultRelInfo,
+						  rel,
+						  0,			/* dummy rangetable index */
+						  CMD_DELETE,	/* don't need any index info */
+						  false);
+		resultRelInfo++;
+	}
+	estate->es_result_relations = resultRelInfos;
+	estate->es_num_result_relations = list_length(rels);
+
+	/*
+	 * Process all BEFORE STATEMENT TRUNCATE triggers before we begin
+	 * truncating (this is because one of them might throw an error).
+	 * Also, if we were to allow them to prevent statement execution,
+	 * that would need to be handled here.
+	 */
+	resultRelInfo = resultRelInfos;
+	foreach(cell, rels)
+	{
+		estate->es_result_relation_info = resultRelInfo;
+		ExecBSTruncateTriggers(estate, resultRelInfo);
+		resultRelInfo++;
+	}
+
 	/*
 	 * OK, truncate each table.
 	 */
@@ -1225,12 +1275,13 @@ ExecuteTruncate(TruncateStmt *stmt)
 	foreach(cell, rels)
 	{
 		Relation	rel = (Relation) lfirst(cell);
+
 		TruncateRelfiles(rel);
+
 		/*
 		 * Reconstruct the indexes to match, and we're done.
 		 */
 		reindex_relation(RelationGetRelid(rel), true);
-		heap_close(rel, NoLock);
 	}
 
 	if (Gp_role == GP_ROLE_DISPATCH)
@@ -1260,6 +1311,31 @@ ExecuteTruncate(TruncateStmt *stmt)
 							   "TRUNCATE", "");
 		}
 
+	}
+
+	/*
+	 * Process all AFTER STATEMENT TRUNCATE triggers.
+	 */
+	resultRelInfo = resultRelInfos;
+	foreach(cell, rels)
+	{
+		estate->es_result_relation_info = resultRelInfo;
+		ExecASTruncateTriggers(estate, resultRelInfo);
+		resultRelInfo++;
+	}
+
+	/* Handle queued AFTER triggers */
+	AfterTriggerEndQuery(estate);
+
+	/* We can clean up the EState now */
+	FreeExecutorState(estate);
+
+	/* And close the rels (can't do this while EState still holds refs) */
+	foreach(cell, rels)
+	{
+		Relation	rel = (Relation) lfirst(cell);
+
+		heap_close(rel, NoLock);
 	}
 }
 
@@ -2214,27 +2290,52 @@ renameatt(Oid myrelid,
 }
 
 /*
- *		renamerel		- change the name of a relation
+ * A helper function for RenameRelation, to createa a very minimal, fake,
+ * RelationData struct for a relation. This is used in
+ * gp_allow_rename_relation_without_lock mode, in place of opening the
+ * relcache entry for real.
  *
- *		XXX - When renaming sequences, we don't bother to modify the
- *			  sequence name that is stored within the sequence itself
- *			  (this would cause problems with MVCC). In the future,
- *			  the sequence name should probably be removed from the
- *			  sequence, AFAIK there's no need for it to be there.
+ * RenameRelation only needs the rd_rel field to be filled in, so that's
+ * all we fetch.
+ */
+static Relation
+fake_relation_open(Oid myrelid)
+{
+	Relation	relrelation;	/* for RELATION relation */
+	Relation	fakerel;
+	HeapTuple	reltup;
+
+	fakerel = palloc0(sizeof(RelationData));
+
+	/*
+	 * Find relation's pg_class tuple, and make sure newrelname isn't in use.
+	 */
+	relrelation = heap_open(RelationRelationId, RowExclusiveLock);
+
+	reltup = SearchSysCacheCopy(RELOID,
+								ObjectIdGetDatum(myrelid),
+								0, 0, 0);
+	if (!HeapTupleIsValid(reltup))		/* shouldn't happen */
+		elog(ERROR, "cache lookup failed for relation %u", myrelid);
+	fakerel->rd_rel = (Form_pg_class) GETSTRUCT(reltup);
+
+	heap_close(relrelation, RowExclusiveLock);
+
+	return fakerel;
+}
+
+/*
+ * Execute ALTER TABLE/INDEX/SEQUENCE/VIEW RENAME
+ *
+ * Caller has already done permissions checks.
  */
 void
-renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *stmt)
+RenameRelation(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *stmt)
 {
 	Relation	targetrelation;
-	Relation	relrelation;	/* for RELATION relation */
-	HeapTuple	reltup;
-	Form_pg_class relform;
-	Oid			typeId;
 	Oid			namespaceId;
-	char	   *oldrelname;
 	char		relkind;
-	bool		relhastriggers;
-	bool		isSystemRelation;
+	char	   *oldrelname;
 
 	/*
 	 * In Postgres, grab an exclusive lock on the target table, index, sequence
@@ -2245,7 +2346,9 @@ renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *s
 	 * catalogs. This will change transaction isolation behaviors, however, this
 	 * won't cause any data corruption.
 	 */
-	if (!gp_allow_rename_relation_without_lock)
+	if (gp_allow_rename_relation_without_lock)
+		targetrelation = fake_relation_open(myrelid);
+	else
 		targetrelation = relation_open(myrelid, AccessExclusiveLock);
 
 	/* if this is a child table of a partitioning configuration, complain */
@@ -2265,23 +2368,9 @@ renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *s
 						get_rel_name(master), pretty ? pretty : "" )));
 	}
 
-	/*
-	 * Find relation's pg_class tuple, and make sure newrelname isn't in use.
-	 */
-	relrelation = heap_open(RelationRelationId, RowExclusiveLock);
-
-	reltup = SearchSysCacheCopy(RELOID,
-								ObjectIdGetDatum(myrelid),
-								0, 0, 0);
-	if (!HeapTupleIsValid(reltup))		/* shouldn't happen */
-		elog(ERROR, "cache lookup failed for relation %u", myrelid);
-	relform = (Form_pg_class) GETSTRUCT(reltup);
-
-	relkind = relform->relkind;
-	namespaceId = relform->relnamespace;
-	relhastriggers = relform->reltriggers;
-	typeId = relform->reltype;
-	oldrelname = pstrdup(NameStr(relform->relname));
+	namespaceId = RelationGetNamespace(targetrelation);
+	relkind = targetrelation->rd_rel->relkind;
+	oldrelname = RelationGetRelationName(targetrelation);
 
 	/*
 	 * For compatibility with prior releases, we don't complain if ALTER TABLE
@@ -2291,70 +2380,27 @@ renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *s
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a sequence",
-						oldrelname)));
+						RelationGetRelationName(targetrelation))));
 
 	if (reltype == OBJECT_VIEW && relkind != RELKIND_VIEW)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a view",
-						oldrelname)));
+						RelationGetRelationName(targetrelation))));
 
-	if (get_relname_relid(newrelname, namespaceId) != InvalidOid)
+	/*
+	 * Don't allow ALTER TABLE on composite types.
+	 * We want people to use ALTER TYPE for that.
+	 */
+	if (relkind == RELKIND_COMPOSITE_TYPE)
 		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_TABLE),
-				 errmsg("relation \"%s\" already exists",
-						newrelname)));
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is a composite type",
+						RelationGetRelationName(targetrelation)),
+				 errhint("Use ALTER TYPE instead.")));
 
-
-	isSystemRelation = IsSystemNamespace(namespaceId) ||
-					   IsToastNamespace(namespaceId) ||
-					   IsAoSegmentNamespace(namespaceId);
-
-	Assert (allowSystemTableModsDDL || !isSystemRelation);
-
-	if (get_relname_relid(newrelname, namespaceId) != InvalidOid)
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_TABLE),
-				 errmsg("relation \"%s\" already exists",
-						newrelname)));
-
-	/*
-	 * Update pg_class tuple with new relname.	(Scribbling on reltup is OK
-	 * because it's a copy...)
-	 */
-	namestrcpy(&(relform->relname), newrelname);
-
-	simple_heap_update(relrelation, &reltup->t_self, reltup);
-
-	/* keep the system catalog indexes current */
-	CatalogUpdateIndexes(relrelation, reltup);
-
-	heap_freetuple(reltup);
-	heap_close(relrelation, NoLock);
-
-	/*
-	 * Also rename the associated type, if any.
-	 */
-	if (OidIsValid(typeId))
-	{
-		if (!TypeTupleExists(typeId))
-			ereport(WARNING,
-					(errcode(ERRCODE_UNDEFINED_OBJECT),
-					 errmsg("type \"%s\" does not exist", oldrelname)));
-		else
-			TypeRename(typeId, newrelname, namespaceId);
-	}
-
-	/*
-	 * Also rename the associated constraint, if any.
-	 */
-	if (relkind == RELKIND_INDEX)
-	{
-		Oid			constraintId = get_index_constraint(myrelid);
-
-		if (OidIsValid(constraintId))
-			RenameConstraintById(constraintId, newrelname);
-	}
+	/* Do the work */
+	RenameRelationInternal(myrelid, newrelname, namespaceId);
 
 	/* MPP-3059: recursive rename of partitioned table */
 	/* Note: the top-level RENAME has bAllowPartn=FALSE, while the
@@ -2366,6 +2412,7 @@ renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *s
 		(Gp_role == GP_ROLE_DISPATCH))
 	{
 		PartitionNode *pNode;
+
 		pNode = RelationBuildPartitionDescByOid(myrelid, false);
 
 		if (pNode)
@@ -2422,6 +2469,110 @@ renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *s
 		}
 	}
 
+	/*
+	 * Close rel, but keep exclusive lock!
+	 */
+	if (!gp_allow_rename_relation_without_lock)
+		relation_close(targetrelation, NoLock);
+}
+
+/*
+ *		RenameRelationInternal - change the name of a relation
+ *
+ *		XXX - When renaming sequences, we don't bother to modify the
+ *			  sequence name that is stored within the sequence itself
+ *			  (this would cause problems with MVCC). In the future,
+ *			  the sequence name should probably be removed from the
+ *			  sequence, AFAIK there's no need for it to be there.
+ */
+void
+RenameRelationInternal(Oid myrelid, const char *newrelname, Oid namespaceId)
+{
+	Relation	targetrelation;
+	Relation	relrelation;	/* for RELATION relation */
+	HeapTuple	reltup;
+	Form_pg_class relform;
+	bool		isSystemRelation;
+
+	/*
+	 * In Postgres:
+	 * Grab an exclusive lock on the target table, index, sequence or view,
+	 * which we will NOT release until end of transaction.
+	 *
+	 * In GPDB, added supportability feature under GUC to allow rename table
+	 * without AccessExclusiveLock for scenarios like directly modifying system
+	 * catalogs. This will change transaction isolation behaviors, however, this
+	 * won't cause any data corruption.
+	 */
+	if (gp_allow_rename_relation_without_lock)
+		targetrelation = fake_relation_open(myrelid);
+	else
+		targetrelation = relation_open(myrelid, AccessExclusiveLock);
+
+	isSystemRelation = IsSystemNamespace(namespaceId) ||
+					   IsToastNamespace(namespaceId) ||
+					   IsAoSegmentNamespace(namespaceId);
+
+	Assert (allowSystemTableModsDDL || !isSystemRelation);
+
+	/*
+	 * Find relation's pg_class tuple, and make sure newrelname isn't in use.
+	 */
+	relrelation = heap_open(RelationRelationId, RowExclusiveLock);
+
+	reltup = SearchSysCacheCopy(RELOID,
+								ObjectIdGetDatum(myrelid),
+								0, 0, 0);
+	if (!HeapTupleIsValid(reltup))		/* shouldn't happen */
+		elog(ERROR, "cache lookup failed for relation %u", myrelid);
+	relform = (Form_pg_class) GETSTRUCT(reltup);
+
+	if (get_relname_relid(newrelname, namespaceId) != InvalidOid)
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_TABLE),
+				 errmsg("relation \"%s\" already exists",
+						newrelname)));
+
+	/*
+	 * Update pg_class tuple with new relname.	(Scribbling on reltup is OK
+	 * because it's a copy...)
+	 */
+	namestrcpy(&(relform->relname), newrelname);
+
+	simple_heap_update(relrelation, &reltup->t_self, reltup);
+
+	/* keep the system catalog indexes current */
+	CatalogUpdateIndexes(relrelation, reltup);
+
+	heap_freetuple(reltup);
+	heap_close(relrelation, NoLock);
+
+	/*
+	 * Also rename the associated type, if any.
+	 */
+	if (OidIsValid(targetrelation->rd_rel->reltype))
+	{
+		if (!TypeTupleExists(targetrelation->rd_rel->reltype))
+			ereport(WARNING,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("type \"%s\" does not exist",
+							RelationGetRelationName(targetrelation))));
+		else
+			RenameTypeInternal(targetrelation->rd_rel->reltype,
+						   newrelname, namespaceId);
+	}
+
+	/*
+	 * Also rename the associated constraint, if any.
+	 */
+	if (targetrelation->rd_rel->relkind == RELKIND_INDEX)
+	{
+		Oid			constraintId = get_index_constraint(myrelid);
+
+		if (OidIsValid(constraintId))
+			RenameConstraintById(constraintId, newrelname);
+	}
+
 	/* MPP-6929: metadata tracking */
 	if ((Gp_role == GP_ROLE_DISPATCH)
 		&&
@@ -2429,7 +2580,7 @@ renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *s
 		 * if modifying system tables (eg during upgrade)
 		 */
 		( ! ( (PG_CATALOG_NAMESPACE == namespaceId) && (allowSystemTableModsDDL)))
-		&& (   MetaTrackValidRelkind(relkind)
+		&& (   MetaTrackValidRelkind(targetrelation->rd_rel->relkind)
 			&& METATRACK_VALIDNAMESPACE(namespaceId)
 			   && (!(isAnyTempNamespace(namespaceId)))
 				))
@@ -2440,9 +2591,7 @@ renamerel(Oid myrelid, const char *newrelname, ObjectType reltype, RenameStmt *s
 				);
 
 	/*
-	 * In Postgres, close rel, but keep exclusive lock!
-	 *
-	 * In GPDB, skip this under GUC. Same reason as relation_open().
+	 * Close rel, but keep exclusive lock!
 	 */
 	if (!gp_allow_rename_relation_without_lock)
 		relation_close(targetrelation, NoLock);
@@ -2831,6 +2980,66 @@ ATController(Relation rel, List *cmds, bool recurse)
 		ATAddToastIfNeeded(&wqueue);
 	}
 
+}
+
+
+/*
+ * prepSplitCmd
+ *
+ * Do initial sanity checking for an ALTER TABLE ... SPLIT PARTITION cmd.
+ * - Shouldn't have children
+ * - The usual permissions checks
+ * - Not called on HASH
+ */
+static void
+prepSplitCmd(Relation rel, PgPartRule *prule, bool is_at)
+{
+	PartitionNode		*pNode = NULL;
+	pNode = RelationBuildPartitionDesc(rel, false);
+
+	if (prule->topRule->children)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot split partition with child "
+									   "partitions"),
+						errhint("Try splitting the child partitions.")));
+
+	}
+
+	if (prule->topRule->parisdefault &&
+		prule->pNode->part->parkind == 'r' &&
+		is_at)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("AT clause cannot be used when splitting "
+						"a default RANGE partition")));
+	}
+	else if ((prule->pNode->part->parkind == 'l') && (pNode !=NULL && pNode->default_part)
+			 && (pNode->default_part->children))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_GP_FEATURE_NOT_SUPPORTED),
+						errmsg("SPLIT PARTITION is not "
+								"currently supported when leaf partition is "
+								"list partitioned in multi level partition table")));
+		}
+	else if ((prule->pNode->part->parkind == 'l') && !is_at)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("cannot SPLIT DEFAULT PARTITION "
+						"with LIST"),
+				errhint("Use SPLIT with the AT clause instead.")));
+
+	}
+
+	if (prule->pNode->part->parkind == 'h')
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					errmsg("SPLIT is not supported for "
+						"HASH partitions")));
 }
 
 /*
@@ -3388,8 +3597,8 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 				/*
 				 * Need to do a bunch of validation:
 				 * 0) Target exists
-				 * 0.5) Shouldn't have children
-				 * 1) The usual permissions checks
+				 * 0.5) Shouldn't have children (Done in prepSplitCmd)
+				 * 1) The usual permissions checks (Done in prepSplitCmd)
 				 * 2) Not called on HASH
 				 * 3) AT () parameter falls into constraint specified
 				 * 4) INTO partitions don't exist except for the one being split
@@ -3398,46 +3607,13 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 				/* We'll error out if it doesn't exist */
 				prule1 = get_part_rule(rel, pid, true, true, NULL, false);
 
-				if (prule1->topRule->children)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("cannot split partition with child "
-									"partitions"),
-							 errhint("Try splitting the child partitions.")));
-
 				target = heap_open(prule1->topRule->parchildrelid,
 								   AccessExclusiveLock);
 
 				if (linitial((List *)pc->arg1))
 					is_at = false;
 
-				if (prule1->topRule->parisdefault &&
-					prule1->pNode->part->parkind == 'r' &&
-					is_at)
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_SYNTAX_ERROR),
-							 errmsg("AT clause cannot be used when splitting "
-									"a default RANGE partition")));
-				}
-				else if (prule1->pNode->part->parkind == 'l' && !is_at)
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_SYNTAX_ERROR),
-							 errmsg("cannot SPLIT DEFAULT PARTITION "
-									"with LIST"),
-							errhint("Use SPLIT with the AT clause instead.")));
-
-				}
-
-				if (prule1->pNode->part->parkind == 'h')
-					ereport(ERROR,
-							(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-							 errmsg("SPLIT is not supported for "
-									"HASH partitions")));
-
-				if (linitial((List *)pc->arg1))
-					is_at = false;
+				prepSplitCmd(rel, prule1, is_at);
 
 				todo = (List *)pc->arg1;
 
@@ -3822,7 +3998,7 @@ ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
 				 * By the way, at this point
 				 *   prule1 refers to the part to split
 				 *   prule2 refers to the first INTO part
-				 *   prule3 refers to the seconde INTO part
+				 *   prule3 refers to the second INTO part
 				 */
 				Insist( prule2 == NULL || prule3 == NULL );
 				
@@ -6469,9 +6645,9 @@ ATExecSetStatistics(Relation rel, const char *colName, Node *newValue)
 				 errmsg("statistics target %d is too low",
 						newtarget)));
 	}
-	else if (newtarget > 1000)
+	else if (newtarget > 10000)
 	{
-		newtarget = 1000;
+		newtarget = 10000;
 		ereport(WARNING,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("lowering statistics target to %d",
@@ -8128,7 +8304,7 @@ ATPrepAlterColumnType(List **wqueue,
 			ereport(ERROR,
 					(errcode(ERRCODE_GROUPING_ERROR),
 			errmsg("cannot use aggregate function in transform expression")));
-		if (pstate->p_hasWindFuncs)
+		if (pstate->p_hasWindowFuncs)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 			errmsg("cannot use window function in transform expression")));
@@ -9432,9 +9608,9 @@ copy_append_only_data(
 {
 	MIRRORED_LOCK_DECLARE;
 
+	char		   *basepath;
 	char srcFileName[MAXPGPATH];
 	char dstFileName[MAXPGPATH];
-	char extension[12];
 
 	File		srcFile;
 
@@ -9454,34 +9630,28 @@ copy_append_only_data(
 	MirrorDataLossTrackingState 	originalMirrorDataLossTrackingState;
 	int64 							originalMirrorDataLossTrackingSessionNum;
 
-	if (segmentFileNum > 0)
-	{
-		sprintf(extension, ".%u", segmentFileNum);
-	}
-	else
-		extension[0] = '\0';
-
-	CopyRelPath(srcFileName, MAXPGPATH, *oldRelFileNode);
-	if (segmentFileNum > 0)
-	{
-		strcat(srcFileName, extension);
-	}
-
 	/*
 	 * Open the files
 	 */
+	basepath = relpath(*oldRelFileNode);
+	if (segmentFileNum > 0)
+		snprintf(srcFileName, sizeof(srcFileName), "%s.%u", basepath, segmentFileNum);
+	else
+		snprintf(srcFileName, sizeof(srcFileName), "%s", basepath);
+	pfree(basepath);
+
 	srcFile = PathNameOpenFile(srcFileName, O_RDONLY | PG_BINARY, 0);
 	if (srcFile < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", srcFileName)));
 
-
-	CopyRelPath(dstFileName, MAXPGPATH, *newRelFileNode);
+	basepath = relpath(*newRelFileNode);
 	if (segmentFileNum > 0)
-	{
-		strcat(dstFileName, extension);
-	}
+		snprintf(dstFileName, sizeof(srcFileName), "%s.%u", basepath, segmentFileNum);
+	else
+		snprintf(dstFileName, sizeof(srcFileName), "%s", basepath);
+	pfree(basepath);
 
 	MirroredAppendOnly_OpenReadWrite(
 								&mirroredDstOpen,
@@ -10464,7 +10634,6 @@ inherit_parent(Relation parent_rel, Relation child_rel, bool is_partition, List 
 	while (HeapTupleIsValid(inheritsTuple = systable_getnext(scan)))
 	{
 		Form_pg_inherits inh = (Form_pg_inherits) GETSTRUCT(inheritsTuple);
-
 		if (inh->inhparent == RelationGetRelid(parent_rel))
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_TABLE),
@@ -10634,7 +10803,7 @@ decompile_conbin(HeapTuple contup, TupleDesc tupdesc)
 
 	expr = DirectFunctionCall2(pg_get_expr, attr,
 							   ObjectIdGetDatum(con->conrelid));
-	return DatumGetCString(DirectFunctionCall1(textout, expr));
+	return TextDatumGetCString(expr);
 }
 
 /*
@@ -11786,10 +11955,7 @@ ATExecSetDistributedBy(Relation rel, Node *node, AlterTableCmd *cmd)
 							RelationGetRelationName(rel))));
 			}
 
-			policy = (GpPolicy *) palloc(sizeof(GpPolicy));
-			policy->ptype = POLICYTYPE_PARTITIONED;
-			policy->nattrs = 0;
-
+			policy = createRandomDistribution();
 			rel->rd_cdbpolicy = GpPolicyCopy(GetMemoryChunkContext(rel), policy);
 			GpPolicyReplace(RelationGetRelid(rel), policy);
 
@@ -11947,6 +12113,26 @@ ATExecSetDistributedBy(Relation rel, Node *node, AlterTableCmd *cmd)
 			elog(LOG, "ALTER SET DISTRIBUTED BY: falling back to legacy query optimizer to ensure re-distribution of tuples.");
 		}
 
+		GpPolicy * original_policy = NULL;
+
+		if (force_reorg && !rand_pol)
+		{
+			/*
+			 * since we force the reorg, we don't care about the original
+			 * distribution policy of the source table hence, we can set the
+			 * policy to random, which will force it to redistribute if the new
+			 * distribution policy is partitioned, even the new partition policy
+			 * is same as the original one, the query optimizer will generate
+			 * redistribute plan.
+			 */
+			GpPolicy * random_policy = createRandomDistribution();
+
+			original_policy = rel->rd_cdbpolicy;
+			rel->rd_cdbpolicy = GpPolicyCopy(GetMemoryChunkContext(rel),
+											 random_policy);
+			GpPolicyReplace(RelationGetRelid(rel), random_policy);
+		}
+
 		/* Step (b) - build CTAS */
 		queryDesc = build_ctas_with_dist(rel, ldistro,
 						untransformRelOptions(newOptions),
@@ -11984,6 +12170,12 @@ ATExecSetDistributedBy(Relation rel, Node *node, AlterTableCmd *cmd)
 		PG_END_TRY();
 
 		CommandCounterIncrement(); /* see the effects of the command */
+
+		if (original_policy)
+		{
+			rel->rd_cdbpolicy = original_policy;
+			GpPolicyReplace(RelationGetRelid(rel), original_policy);
+		}
 
 		/*
 		 * Step (d) - tell the seg nodes about the temporary relation. This
@@ -12588,6 +12780,7 @@ ATPExecPartAlter(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	AlterPartitionCmd 	*pc2		   = NULL;
 	bool				 bPartitionCmd = true;	/* true if a "partition" cmd */
 	Relation			 rel2		   = rel;
+	bool				prepCmd		= false;	/* true if the sub command of ALTER PARTITION is a SPLIT PARTITION */
 
 	while (1)
 	{
@@ -12609,11 +12802,14 @@ ATPExecPartAlter(List **wqueue, AlteredTableInfo *tab, Relation rel,
 
 	switch (atc->subtype)
 	{
+		case AT_PartSplit:				/* Split */
+		{
+			prepCmd = true; /* if sub-command is split partition then it will require some preprocessing */
+		}
 		case AT_PartAdd:				/* Add */
 		case AT_PartAddForSplit:		/* Add, as part of a split */
 		case AT_PartCoalesce:			/* Coalesce */
 		case AT_PartDrop:				/* Drop */
-		case AT_PartSplit:				/* Split */
 		case AT_PartMerge:				/* Merge */
 		case AT_PartModify:				/* Modify */
 		case AT_PartSetTemplate:		/* Set Subpartition Template */
@@ -12673,6 +12869,18 @@ ATPExecPartAlter(List **wqueue, AlteredTableInfo *tab, Relation rel,
 			pid2->location  = -1;
 
 			pc2->partid = (Node *)pid2;
+
+			if (prepCmd) /* Prep the split partition sub-command */
+			{
+				PgPartRule			*prule1	= NULL;
+				bool is_at = true;
+				prule1 = get_part_rule(rel, pid2, true, true, NULL, false);
+
+				if (linitial((List *)pc2->arg1)) /* Check if the SPLIT PARTITION command has an AT clause */
+					is_at = false;
+
+				prepSplitCmd(rel, prule1, is_at);
+			}
 		}
 		else /* treat as a table */
 		{
@@ -12735,6 +12943,7 @@ ATPExecPartAlter(List **wqueue, AlteredTableInfo *tab, Relation rel,
 						 AccessExclusiveLock);
 		bPartitionCmd = false;
 	}
+
 	/* execute the command */
 	ATExecCmd(wqueue, tab, &rel2, atc);
 
@@ -13093,7 +13302,6 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 		RangeVar		   *oldrelrv;
 		PartitionNode 	   *pn;
 		Relation			oldrel;
-		Relation			newrel;
 
 		pn = RelationBuildPartitionDesc(rel, false);
 		pcols = get_partition_attrs(pn);
@@ -13113,18 +13321,6 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 
 		newrelid = RangeVarGetRelid(newrelrv, false);
 		Assert(OidIsValid(newrelid));
-		newrel = heap_open(newrelid, NoLock);
-		if (RelationIsExternal(newrel))
-		{
-			if (prule && prule->topRule && prule->topRule->parparentoid)
-			{
-				heap_close(newrel, NoLock);
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("cannot exchange sub partition with external table")));
-			}
-		}
-		heap_close(newrel, NoLock);
 
 		orig_pid_type = pid->idtype;
 		orig_prule = prule;
@@ -13216,8 +13412,8 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 		char			*oldname;
 		Relation		 newrel;
 		Relation		 oldrel;
-		AttrMap			*newmap;
-		AttrMap			*oldmap;
+		AttrMap			*newmap; /* used for compatability check below only */
+		AttrMap			*oldmap; /* used for compatability check below only */
 		List			*newcons;
 		bool			 ok;
 		bool			 validate	= intVal(pc2->arg1) ? true : false;
@@ -13228,10 +13424,10 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 
 		newrel = heap_open(newrelid, AccessExclusiveLock);
 		if (RelationIsExternal(newrel) && validate)
-		{
-			heap_close(newrel, NoLock);
-			elog(ERROR, "Validation of external tables not supported. Use WITHOUT VALIDATION.");
-		}
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("validation of external tables not supported"),
+					 errhint("Use WITHOUT VALIDATION.")));
 
 		oldrel = heap_open(oldrelid, AccessExclusiveLock);
 
@@ -13247,9 +13443,9 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 		newname = pstrdup(RelationGetRelationName(newrel));
 		oldname = pstrdup(RelationGetRelationName(oldrel));
 		
-		ok = map_part_attrs(rel, newrel, &newmap, FALSE);
+		ok = map_part_attrs(rel, newrel, &newmap, TRUE);
 		Assert(ok);
-		ok = map_part_attrs(rel, oldrel, &oldmap, FALSE);
+		ok = map_part_attrs(rel, oldrel, &oldmap, TRUE);
 		Assert(ok);
 
 		newcons = cdb_exchange_part_constraints(
@@ -13270,8 +13466,8 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 		heap_close(newrel, NoLock);
 		heap_close(oldrel, NoLock);
 
-		/* rename rel renames the type too */
-		renamerel(oldrelid, tmpname1, OBJECT_TABLE, NULL);
+		/* RenameRelation renames the type too */
+		RenameRelation(oldrelid, tmpname1, OBJECT_TABLE, NULL);
 		CommandCounterIncrement();
 		RelationForgetRelation(oldrelid);
 
@@ -13294,7 +13490,7 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 			 * collision.  It would be nice to have an atomic
 			 * operation to rename and renamespace a relation... 
 			 */
-			renamerel(newrelid, tmpname2, OBJECT_TABLE, NULL);
+			RenameRelation(newrelid, tmpname2, OBJECT_TABLE, NULL);
 			CommandCounterIncrement();
 			RelationForgetRelation(newrelid);
 
@@ -13307,11 +13503,11 @@ ATPExecPartExchange(AlteredTableInfo *tab, Relation rel, AlterPartitionCmd *pc)
 			free_object_addresses(objsMoved);
 		}
 
-		renamerel(newrelid, oldname, OBJECT_TABLE, NULL);
+		RenameRelation(newrelid, oldname, OBJECT_TABLE, NULL);
 		CommandCounterIncrement();
 		RelationForgetRelation(newrelid);
 
-		renamerel(oldrelid, newname, OBJECT_TABLE, NULL);
+		RenameRelation(oldrelid, newname, OBJECT_TABLE, NULL);
 		CommandCounterIncrement();
 		RelationForgetRelation(oldrelid);
 
@@ -15373,10 +15569,10 @@ ATPExecPartTruncate(Relation rel,
 
 		rel2 = heap_open(prule->topRule->parchildrelid, AccessShareLock);
 		if (RelationIsExternal(rel2))
-		{
-			heap_close(rel2, NoLock);
-			elog(ERROR, "Cannot truncate external partition");
-		}
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot truncate external partition")));
+
 		rv = makeRangeVar(get_namespace_name(RelationGetNamespace(rel2)),
 						  pstrdup(RelationGetRelationName(rel2)), -1);
 

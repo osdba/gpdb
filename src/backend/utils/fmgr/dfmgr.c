@@ -247,14 +247,6 @@ internal_load_library(const char *libname)
 		/* Check the magic function to determine compatibility */
 		magic_func = (PGModuleMagicFunction)
 			pg_dlsym(file_scanner->handle, PG_MAGIC_FUNCTION_NAME_STRING);
-
-		if (magic_func == NULL)
-		{
-			/* Check if this is a C++ library */
-			magic_func =(PGModuleMagicFunction)
-				pg_dlsym(file_scanner->handle, PG_MAGIC_FUNCTION_NAME_CPP_STRING);
-		}
-
 		if (magic_func)
 		{
 			const Pg_magic_struct *magic_data_ptr = (*magic_func) ();
@@ -327,12 +319,7 @@ get_magic_product(const Pg_magic_struct *module_magic_data)
 
 		/* Handle Unrecognized product codes */
 		default:
-		{
-			size_t len = sizeof("Product()") + 10 + 1;
-			char *prodname = palloc(len);
-			snprintf(prodname, len, "Product(%d)", module_magic_data->product);
-			return prodname;
-		}
+			return psprintf("Product(%d)", module_magic_data->product);
 	}
 }
 

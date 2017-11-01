@@ -5,6 +5,7 @@
  *
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -169,10 +170,9 @@ struct PGPROC
 	 * Information for resource group
 	 */
 	bool		resWaiting;	/* true if waiting for an Resource Group lock */
-	bool		resGranted;	/* true means a resource group slot is granted.
-							   false when wake up from a resource group which
-							   is locked for drop */
-	int			resSlotId;	/* the resource group slot id granted */
+	void		*resSlot;	/* the resource group slot granted.
+   							 * NULL indicates the resource group is
+							 * locked for drop. */
 };
 
 /* NOTE: "typedef struct PGPROC PGPROC" appears in storage/lock.h. */

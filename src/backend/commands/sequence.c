@@ -4,6 +4,7 @@
  *	  PostgreSQL sequences support code.
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc.
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -16,6 +17,7 @@
 #include "postgres.h"
 
 #include "access/heapam.h"
+#include "access/bufmask.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
@@ -766,7 +768,7 @@ AlterSequence(AlterSeqStmt *stmt)
 									DF_CANCEL_ON_ERROR|
 									DF_WITH_SNAPSHOT|
 									DF_NEED_TWO_PHASE,
-									NIL, /* FIXME */
+									NIL,
 									NULL);
 
 		if (!bSeqIsTemp)
@@ -2006,3 +2008,14 @@ cdb_sequence_nextval_server(Oid    tablespaceid,
     /* Cleanup. */
     cdb_sequence_relation_term(seqrel);
 }                               /* cdb_sequence_server_nextval */
+
+/*
+ * Mask a Sequence page before performing consistency checks on it.
+ */
+void
+seq_mask(char *page, BlockNumber blkno)
+{
+	mask_page_lsn_and_checksum(page);
+
+	mask_unused_space(page);
+}

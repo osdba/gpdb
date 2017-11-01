@@ -10,10 +10,11 @@
  * the location.
  *
  * Portions Copyright (c) 2006-2009, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/nodes/parsenodes.h,v 1.376 2008/10/04 21:56:55 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/nodes/parsenodes.h,v 1.361 2008/03/21 22:41:48 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -23,6 +24,7 @@
 #include "nodes/bitmapset.h"
 #include "nodes/primnodes.h"
 #include "nodes/value.h"
+#include "catalog/gp_policy.h"
 
 typedef struct PartitionNode PartitionNode; /* see relation.h */
 
@@ -118,9 +120,10 @@ typedef struct Query
 	IntoClause *intoClause;		/* target for SELECT INTO / CREATE TABLE AS */
 
 	bool		hasAggs;		/* has aggregates in tlist or havingQual */
-	bool		hasWindFuncs;	/* has window function(s) in target list */
+	bool		hasWindowFuncs; /* has window functions in tlist */
 	bool		hasSubLinks;	/* has subquery SubLink */
 	bool        hasDynamicFunctions; /* has functions with unstable return types */
+	bool		hasFuncsWithExecRestrictions; /* has functions with EXECUTE ON MASTER or ALL SEGMENTS */
 
 	List	   *rtable;			/* list of range table entries */
 	FromExpr   *jointree;		/* table join tree (FROM and WHERE clauses) */
@@ -154,11 +157,11 @@ typedef struct Query
 	List	   *sortClause;		/* a list of SortGroupClause's */
 
 	List	   *scatterClause;	/* a list of tle's */
+	bool		isTableValueSelect; /* GPDB: Is this a TABLE (...) subquery argument? */
 
 	List	   *cteList;		/* a list of CommonTableExprs in WITH clause */
 	bool		hasRecursive;	/* Whether this query has a recursive WITH
 								 * clause */
-	bool		hasModifyingCTE;	/* has INSERT/UPDATE/DELETE in WITH clause */
 
 	Node	   *limitOffset;	/* # of result tuples to skip (int8 expr) */
 	Node	   *limitCount;		/* # of result tuples to return (int8 expr) */
@@ -307,21 +310,21 @@ typedef struct TypeCast
  * agg_star indicates we saw a 'foo(*)' construct, while agg_distinct
  * indicates we saw 'foo(DISTINCT ...)'.  In either case, the construct
  * *must* be an aggregate call.  Otherwise, it might be either an
- * aggregate or some other kind of function.  However, if OVER is present
- * it had better be an aggregate or window function.
+ * aggregate or some other kind of function.  However, if FILTER or OVER is
+ * present it had better be an aggregate or window function.
  */
 typedef struct FuncCall
 {
 	NodeTag		type;
 	List	   *funcname;		/* qualified name of function */
 	List	   *args;			/* the arguments (list of exprs) */
-    List       *agg_order;      /* ORDER BY (list of SortBy) */
+	List	   *agg_order;		/* ORDER BY (list of SortBy) */
+	Node	   *agg_filter;		/* FILTER clause, if any */
 	bool		agg_star;		/* argument was really '*' */
 	bool		agg_distinct;	/* arguments were labeled DISTINCT */
 	bool		func_variadic;	/* last argument was labeled VARIADIC */
+	struct WindowDef *over;		/* OVER clause, if any */
 	int			location;		/* token location, or -1 if unknown */
-	Node	   *over;			/* over clause */
-    Node       *agg_filter;     /* aggregation filter clause */
 } FuncCall;
 
 /*
@@ -405,6 +408,59 @@ typedef struct SortBy
 	Node	   *node;			/* expression to sort on */
 	int			location;		/* operator location, or -1 if none/unknown */
 } SortBy;
+
+/*
+ * WindowDef - raw representation of WINDOW and OVER clauses
+ *
+ * For entries in a WINDOW list, "name" is the window name being defined.
+ * For OVER clauses, we use "name" for the "OVER window" syntax, or "refname"
+ * for the "OVER (window)" syntax, which is subtly different --- the latter
+ * implies overriding the window frame clause.
+ */
+typedef struct WindowDef
+{
+	NodeTag		type;
+	char	   *name;			/* window's own name */
+	char	   *refname;		/* referenced window name, if any */
+	List	   *partitionClause;	/* PARTITION BY expression list */
+	List	   *orderClause;	/* ORDER BY (list of SortBy) */
+	int			frameOptions;	/* frame_clause options, see below */
+	Node	   *startOffset;	/* expression for starting bound, if any */
+	Node	   *endOffset;		/* expression for ending bound, if any */
+	int			location;		/* parse location, or -1 if none/unknown */
+} WindowDef;
+
+/*
+ * frameOptions is an OR of these bits.  The NONDEFAULT and BETWEEN bits are
+ * used so that ruleutils.c can tell which properties were specified and
+ * which were defaulted; the correct behavioral bits must be set either way.
+ * The START_foo and END_foo options must come in pairs of adjacent bits for
+ * the convenience of gram.y, even though some of them are useless/invalid.
+ * We will need more bits (and fields) to cover the full SQL:2008 option set.
+ */
+#define FRAMEOPTION_NONDEFAULT					0x00001 /* any specified? */
+#define FRAMEOPTION_RANGE						0x00002 /* RANGE behavior */
+#define FRAMEOPTION_ROWS						0x00004 /* ROWS behavior */
+#define FRAMEOPTION_BETWEEN						0x00008 /* BETWEEN given? */
+#define FRAMEOPTION_START_UNBOUNDED_PRECEDING	0x00010 /* start is U. P. */
+#define FRAMEOPTION_END_UNBOUNDED_PRECEDING		0x00020 /* (disallowed) */
+#define FRAMEOPTION_START_UNBOUNDED_FOLLOWING	0x00040 /* (disallowed) */
+#define FRAMEOPTION_END_UNBOUNDED_FOLLOWING		0x00080 /* end is U. F. */
+#define FRAMEOPTION_START_CURRENT_ROW			0x00100 /* start is C. R. */
+#define FRAMEOPTION_END_CURRENT_ROW				0x00200 /* end is C. R. */
+#define FRAMEOPTION_START_VALUE_PRECEDING		0x00400 /* start is V. P. */
+#define FRAMEOPTION_END_VALUE_PRECEDING			0x00800 /* end is V. P. */
+#define FRAMEOPTION_START_VALUE_FOLLOWING		0x01000 /* start is V. F. */
+#define FRAMEOPTION_END_VALUE_FOLLOWING			0x02000 /* end is V. F. */
+
+#define FRAMEOPTION_START_VALUE \
+	(FRAMEOPTION_START_VALUE_PRECEDING | FRAMEOPTION_START_VALUE_FOLLOWING)
+#define FRAMEOPTION_END_VALUE \
+	(FRAMEOPTION_END_VALUE_PRECEDING | FRAMEOPTION_END_VALUE_FOLLOWING)
+
+#define FRAMEOPTION_DEFAULTS \
+	(FRAMEOPTION_RANGE | FRAMEOPTION_START_UNBOUNDED_PRECEDING | \
+	 FRAMEOPTION_END_CURRENT_ROW)
 
 /*
  * RangeSubselect - subquery appearing in a FROM clause
@@ -531,7 +587,6 @@ typedef struct DefElem
 	Node	   *arg;			/* a (Value *) or a (TypeName *) */
 	DefElemAction defaction;	/* unspecified action, or SET/ADD/DROP */
 } DefElem;
-
 
 /*
  * LockingClause - raw representation of FOR UPDATE/SHARE options
@@ -812,6 +867,35 @@ typedef struct GroupingFunc
 	int       ngrpcols; /* the number of grouping attributes */
 } GroupingFunc;
 
+
+/*
+ * WindowClause -
+ *		transformed representation of WINDOW and OVER clauses
+ *
+ * A parsed Query's windowClause list contains these structs.  "name" is set
+ * if the clause originally came from WINDOW, and is NULL if it originally
+ * was an OVER clause (but note that we collapse out duplicate OVERs).
+ * partitionClause and orderClause are lists of SortGroupClause structs.
+ * winref is an ID number referenced by WindowFunc nodes; it must be unique
+ * among the members of a Query's windowClause list.
+ * When refname isn't null, the partitionClause is always copied from there;
+ * the orderClause might or might not be copied (see copiedOrder); the framing
+ * options are never copied, per spec.
+ */
+typedef struct WindowClause
+{
+	NodeTag		type;
+	char	   *name;			/* window name (NULL in an OVER clause) */
+	char	   *refname;		/* referenced window name, if any */
+	List	   *partitionClause;	/* PARTITION BY list */
+	List	   *orderClause;	/* ORDER BY list */
+	int			frameOptions;	/* frame_clause options, copied from WindowDef */
+	Node	   *startOffset;	/* expression for starting bound, if any */
+	Node	   *endOffset;		/* expression for ending bound, if any */
+	Index		winref;			/* ID referenced by window functions */
+	bool		copiedOrder;	/* did we copy orderClause from refname? */
+} WindowClause;
+
 /*
  * RowMarkClause -
  *	   representation of FOR UPDATE/SHARE clauses
@@ -990,28 +1074,6 @@ typedef struct SelectStmt
 
 } SelectStmt;
 
-typedef struct WindowSpec
-{
-	NodeTag type;
-	char *name;	/* name of window specification */
-	char *parent; /* parent window, e.g. OVER(PB, myspec); */
-	List *partition; /* PARTITION BY clause */
-	List *order; /* ORDER BY clause */
-	WindowFrame *frame;
-	int			location;		/* token location, or -1 if unknown */
-} WindowSpec;
-
-/*
- * Due to the complexity of the grammar, we need a basic structure inside
- * the grammar parser so that we can get data into the analyzer efficiently
- */
-typedef struct WindowSpecParse
-{
-	NodeTag type;
-	char *name;
-	List *elems;
-} WindowSpecParse;
-
 
 /* ----------------------
  *		Set Operation node for post-analysis query trees
@@ -1023,7 +1085,6 @@ typedef struct WindowSpecParse
  * nodes replaced by SetOperationStmt nodes.
  * ----------------------
  */
-
 typedef struct SetOperationStmt
 {
 	NodeTag		type;
@@ -1426,6 +1487,7 @@ typedef struct CopyStmt
 	List	   *attlist;		/* List of column names (as Strings), or NIL
 								 * for all columns */
 	bool		is_from;		/* TO or FROM */
+	bool		is_program;		/* is 'filename' a program to popen? */
 	bool		skip_ext_partition;		/* skip external partitions */
 	char	   *filename;		/* filename, or NULL for STDIN/STDOUT */
 	List	   *options;		/* List of DefElem nodes */
@@ -1433,6 +1495,9 @@ typedef struct CopyStmt
 	/* Convenient location for dispatch of misc meta data */
 	PartitionNode *partitions;
 	List		*ao_segnos;		/* AO segno map */
+	int			nattrs;
+	GpPolicyType	ptype;
+	AttrNumber	*distribution_attrs;
 } CopyStmt;
 
 /* ----------------------
@@ -2136,13 +2201,18 @@ typedef struct CommentStmt
 #define CURSOR_OPT_HOLD			0x0010	/* WITH HOLD */
 #define CURSOR_OPT_FAST_PLAN	0x0020	/* prefer fast-start plan */
 
+/*
+ * This is used to request the planner to create a plan that's updatable with
+ * CURRENT OF. It can be passed to SPI_prepare_cursor.
+ */
+#define CURSOR_OPT_UPDATABLE	0x0040	/* updateable with CURRENT OF, if possible */
+
 typedef struct DeclareCursorStmt
 {
 	NodeTag		type;
 	char	   *portalname;		/* name of the portal (cursor) */
 	int			options;		/* bitmask of options (see above) */
 	Node	   *query;			/* the raw SELECT query */
-	bool		is_simply_updatable;
 } DeclareCursorStmt;
 
 /* ----------------------
@@ -2247,6 +2317,20 @@ typedef struct AlterFunctionStmt
 } AlterFunctionStmt;
 
 /* ----------------------
+ *		Drop {Function|Aggregate|Operator} Statement
+ * ----------------------
+ */
+typedef struct RemoveFuncStmt
+{
+	NodeTag		type;
+	ObjectType	kind;			/* function, aggregate, operator */
+	List	   *name;			/* qualified name of object to drop */
+	List	   *args;			/* types of the arguments */
+	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
+	bool		missing_ok;		/* skip error if missing? */
+} RemoveFuncStmt;
+
+/* ----------------------
  *		DO Statement
  *
  * DoStmt is the raw parser output, InlineCodeBlock is the execution-time API
@@ -2265,20 +2349,6 @@ typedef struct InlineCodeBlock
 	Oid			langOid;		/* OID of selected language */
 	bool		langIsTrusted;	/* trusted property of the language */
 } InlineCodeBlock;
-
-/* ----------------------
- *		Drop {Function|Aggregate|Operator} Statement
- * ----------------------
- */
-typedef struct RemoveFuncStmt
-{
-	NodeTag		type;
-	ObjectType	kind;			/* function, aggregate, operator */
-	List	   *name;			/* qualified name of object to drop */
-	List	   *args;			/* types of the arguments */
-	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
-	bool		missing_ok;		/* skip error if missing? */
-} RemoveFuncStmt;
 
 /* ----------------------
  *		Drop Operator Class Statement
@@ -2361,7 +2431,7 @@ typedef struct AlterOwnerStmt
 typedef struct AlterTypeStmt
 {
 	NodeTag		type;
-	TypeName   *typeName;
+	List	   *typeName;
 	List	   *encoding;
 } AlterTypeStmt;
 

@@ -3,7 +3,12 @@
  * cdbvars.h
  *	  definitions for Greenplum-specific global variables
  *
- * Copyright (c) 2003-2010, Greenplum inc
+ * Portions Copyright (c) 2003-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/include/cdb/cdbvars.h
  *
  * NOTES
  *	  See src/backend/utils/misc/guc_gp.c for variable external specification.
@@ -888,9 +893,6 @@ extern double	gp_statistics_sampling_threshold;
 
 /* Analyze tools */
 extern int gp_motion_slice_noop;
-#ifdef ENABLE_LTRACE
-extern int gp_ltrace_flag;
-#endif
 
 /* Disable setting of hint-bits while reading db pages */
 extern bool gp_disable_tuple_hints;
@@ -1046,8 +1048,6 @@ extern const char *gpvars_assign_gp_resource_manager_policy(const char *newval, 
 
 extern const char *gpvars_show_gp_resource_manager_policy(void);
 
-extern bool gpvars_assign_max_resource_groups(int newval, bool doit, GucSource source __attribute__((unused)));
-
 extern const char *gpvars_assign_gp_resqueue_memory_policy(const char *newval, bool doit, GucSource source __attribute__((unused)) );
 
 extern const char *gpvars_show_gp_resqueue_memory_policy(void);
@@ -1063,7 +1063,11 @@ extern void increment_command_count(void);
 /*
  * switch to control inverse distribution function strategy.
  */
-extern char *gp_idf_deduplicate_str;
+extern int gp_idf_deduplicate;
+
+#define IDF_DEDUPLICATE_AUTO	0
+#define IDF_DEDUPLICATE_NONE	1
+#define IDF_DEDUPLICATE_FORCE	2
 
 /* default to RANDOM distribution for CREATE TABLE without DISTRIBUTED BY */
 extern bool gp_create_table_random_default_distribution;

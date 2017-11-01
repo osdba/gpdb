@@ -22,6 +22,7 @@
 #include "catalog/pg_type.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
+#include "catalog/pg_statistic.h"
 #include "optimizer/walkers.h"
 #include "utils/rel.h"
 
@@ -35,6 +36,7 @@
 #include "gpos/string/CWStringDynamic.h"
 #include "gpopt/translate/CTranslatorUtils.h"
 #include "gpopt/translate/CDXLTranslateContext.h"
+#include "gpopt/translate/CTranslatorRelcacheToDXL.h"
 
 #include "naucrates/dxl/CDXLUtils.h"
 #include "naucrates/dxl/xml/dxltokens.h"
@@ -154,7 +156,10 @@ CTranslatorUtils::Pdxltabdesc
 			// the fact that catalog tables (master-only) are not analyzed often and will result in Orca producing
 			// inferior plans.
 
-			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("Queries on master-only tables"));
+			GPOS_THROW_EXCEPTION(gpdxl::ExmaDXL, // ulMajor
+								 gpdxl::ExmiQuery2DXLUnsupportedFeature, // ulMinor
+								 CException::ExsevDebug1, // ulSeverityLevel mapped to GPDB severity level
+								 GPOS_WSZ_LIT("Queries on master-only tables"));
 		}
 
 	// add columns from md cache relation object to table descriptor
@@ -689,11 +694,11 @@ CTranslatorUtils::EdxljtFromJoinType
 			edxljt = EdxljtRight;
 			break;
 
-		case JOIN_IN:
+		case JOIN_SEMI:
 			edxljt = EdxljtIn;
 			break;
 
-		case JOIN_LASJ:
+		case JOIN_ANTI:
 			edxljt = EdxljtLeftAntiSemijoin;
 			break;
 
@@ -876,6 +881,49 @@ CTranslatorUtils::PmdidSystemColType
 	}
 }
 
+
+// Returns the length for the system column with given attno number
+const ULONG
+CTranslatorUtils::UlSystemColLength
+	(
+	AttrNumber attno
+	)
+{
+	GPOS_ASSERT(FirstLowInvalidHeapAttributeNumber < attno && 0 > attno);
+
+	switch (attno)
+	{
+		case SelfItemPointerAttributeNumber:
+			// tid type
+			return 6;
+
+		case ObjectIdAttributeNumber:
+		case TableOidAttributeNumber:
+			// OID type
+
+		case MinTransactionIdAttributeNumber:
+		case MaxTransactionIdAttributeNumber:
+			// xid type
+
+		case MinCommandIdAttributeNumber:
+		case MaxCommandIdAttributeNumber:
+			// cid type
+
+		case GpSegmentIdAttributeNumber:
+			// int4
+			return 4;
+
+		default:
+			GPOS_RAISE
+				(
+				gpdxl::ExmaDXL,
+				gpdxl::ExmiPlStmt2DXLConversion,
+				GPOS_WSZ_LIT("Invalid attribute number")
+				);
+			return ULONG_MAX;
+	}
+}
+
 //---------------------------------------------------------------------------
 //	@function:
 //		CTranslatorUtils::Scandirection
@@ -1015,91 +1063,6 @@ CTranslatorUtils::Edxlsetop
 	GPOS_ASSERT(!"Unrecognized set operator type");
 	return EdxlsetopSentinel;
 }
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::Windowexclusion
-//
-//	@doc:
-//		Return the GPDB frame exclusion strategy from its corresponding
-//		DXL representation
-//
-//---------------------------------------------------------------------------
-WindowExclusion
-CTranslatorUtils::Windowexclusion
-	(
-	EdxlFrameExclusionStrategy edxlfes
-	)
-{
-	GPOS_ASSERT(EdxlfesSentinel > edxlfes);
-	ULONG rgrgulMapping[][2] =
-		{
-		{EdxlfesNulls, WINDOW_EXCLUSION_NULL},
-		{EdxlfesCurrentRow, WINDOW_EXCLUSION_CUR_ROW},
-		{EdxlfesGroup, WINDOW_EXCLUSION_GROUP},
-		{EdxlfesTies, WINDOW_EXCLUSION_TIES}
-		};
-
-	const ULONG ulArity = GPOS_ARRAY_SIZE(rgrgulMapping);
-	WindowExclusion we = WINDOW_EXCLUSION_NO_OTHERS;
-
-	for (ULONG ul = 0; ul < ulArity; ul++)
-	{
-		ULONG *pulElem = rgrgulMapping[ul];
-		if ((ULONG) edxlfes == pulElem[0])
-		{
-			we = (WindowExclusion) pulElem[1];
-			break;
-		}
-	}
-	return we;
-}
-
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::Windowboundkind
-//
-//	@doc:
-//		Return the GPDB frame boundary kind from its corresponding
-//		DXL representation
-//
-//---------------------------------------------------------------------------
-WindowBoundingKind
-CTranslatorUtils::Windowboundkind
-	(
-	EdxlFrameBoundary edxlfb
-	)
-{
-	GPOS_ASSERT(EdxlfbSentinel > edxlfb);
-
-	ULONG rgrgulMapping[][2] =
-			{
-			{EdxlfbUnboundedPreceding, WINDOW_UNBOUND_PRECEDING},
-			{EdxlfbBoundedPreceding, WINDOW_BOUND_PRECEDING},
-			{EdxlfbCurrentRow, WINDOW_CURRENT_ROW},
-			{EdxlfbBoundedFollowing, WINDOW_BOUND_FOLLOWING},
-			{EdxlfbUnboundedFollowing, WINDOW_UNBOUND_FOLLOWING},
-			{EdxlfbDelayedBoundedPreceding, WINDOW_DELAYED_BOUND_PRECEDING},
-		    {EdxlfbDelayedBoundedFollowing, WINDOW_DELAYED_BOUND_FOLLOWING}
-			};
-
-	const ULONG ulArity = GPOS_ARRAY_SIZE(rgrgulMapping);
-	WindowBoundingKind wbk = WINDOW_UNBOUND_PRECEDING;
-	for (ULONG ul = 0; ul < ulArity; ul++)
-	{
-		ULONG *pulElem = rgrgulMapping[ul];
-		if ((ULONG) edxlfb == pulElem[0])
-		{
-			wbk = (WindowBoundingKind) pulElem[1];
-			break;
-		}
-	}
-	GPOS_ASSERT(WINDOW_DELAYED_BOUND_FOLLOWING >= wbk && "Invalid window frame boundary");
-
-	return wbk;
-}
-
 
 //---------------------------------------------------------------------------
 //	@function:
@@ -1870,11 +1833,12 @@ CTranslatorUtils::FWindowSpec
 	List *plWindowClause
 	)
 {
-	ListCell *plcWindowCl = NULL;
+	ListCell *plcWindowCl;
 	ForEach (plcWindowCl, plWindowClause)
 	{
-		WindowSpec *pwindowspec = (WindowSpec*) lfirst(plcWindowCl);
-		if (FSortingColumn(pte, pwindowspec->order) || FSortingColumn(pte, pwindowspec->partition))
+		WindowClause *pwc = (WindowClause *) lfirst(plcWindowCl);
+		if (FSortingColumn(pte, pwc->orderClause) ||
+		    FSortingColumn(pte, pwc->partitionClause))
 		{
 			return true;
 		}
@@ -1884,14 +1848,14 @@ CTranslatorUtils::FWindowSpec
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorUtils::PdxlnInt4Const
+//		CTranslatorUtils::PdxlnInt8Const
 //
 //	@doc:
-// 		Construct a scalar const value expression for the given INT value
+// 		Construct a scalar const value expression for the given BIGINT value
 //
 //---------------------------------------------------------------------------
 CDXLNode *
-CTranslatorUtils::PdxlnInt4Const
+CTranslatorUtils::PdxlnInt8Const
 	(
 	IMemoryPool *pmp,
 	CMDAccessor *pmda,
@@ -1899,10 +1863,10 @@ CTranslatorUtils::PdxlnInt4Const
 	)
 {
 	GPOS_ASSERT(NULL != pmp);
-	const IMDTypeInt4 *pmdtypeint4 = pmda->PtMDType<IMDTypeInt4>();
-	pmdtypeint4->Pmdid()->AddRef();
+	const IMDTypeInt8 *pmdtypeint8 = pmda->PtMDType<IMDTypeInt8>();
+	pmdtypeint8->Pmdid()->AddRef();
 
-	CDXLDatumInt4 *pdxldatum = GPOS_NEW(pmp) CDXLDatumInt4(pmp, pmdtypeint4->Pmdid(), false /*fConstNull*/, iVal);
+	CDXLDatumInt8 *pdxldatum = GPOS_NEW(pmp) CDXLDatumInt8(pmp, pmdtypeint8->Pmdid(), false /*fConstNull*/, iVal);
 
 	CDXLScalarConstValue *pdxlConst = GPOS_NEW(pmp) CDXLScalarConstValue(pmp, pdxldatum);
 
@@ -2469,11 +2433,11 @@ CTranslatorUtils::CheckAggregateWindowFn
 	)
 {
 	GPOS_ASSERT(NULL != pnode);
-	GPOS_ASSERT(IsA(pnode, WindowRef));
+	GPOS_ASSERT(IsA(pnode, WindowFunc));
 
-	WindowRef *pwinref = (WindowRef*) pnode;
+	WindowFunc *pwinfunc = (WindowFunc *) pnode;
 
-	if (gpdb::FAggregateExists(pwinref->winfnoid) && !gpdb::FAggHasPrelimOrInvPrelimFunc(pwinref->winfnoid))
+	if (gpdb::FAggregateExists(pwinfunc->winfnoid) && !gpdb::FAggHasPrelimOrInvPrelimFunc(pwinfunc->winfnoid))
 	{
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature,
 				GPOS_WSZ_LIT("Aggregate window function without prelim or inverse prelim function"));

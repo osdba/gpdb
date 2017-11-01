@@ -20,7 +20,7 @@ OBJS = catalog.o dependency.o heap.o index.o indexing.o namespace.o aclchk.o \
        pg_type.o toasting.o \
        pg_exttable.o pg_extprotocol.o \
        pg_proc_callback.o \
-       aoseg.o aoblkdir.o gp_fastsequence.o \
+       aoseg.o aoblkdir.o gp_fastsequence.o gp_segment_config.o \
        pg_attribute_encoding.o pg_compression.o aovisimap.o \
        gp_global_sequence.o gp_persistent.o pg_appendonly.o \
        oid_dispatch.o aocatalog.o $(QUICKLZ_COMPRESSION)
@@ -48,8 +48,8 @@ POSTGRES_BKI_SRCS := $(addprefix $(top_srcdir)/src/include/catalog/, \
 	pg_authid.h pg_auth_members.h pg_shdepend.h pg_shdescription.h pg_resqueue.h pg_resgroup.h\
 	pg_ts_config.h pg_ts_config_map.h pg_ts_dict.h \
 	pg_ts_parser.h pg_ts_template.h pg_extension.h \
-	gp_configuration.h gp_id.h gp_policy.h gp_version.h \
-	gp_segment_config.h gp_fault_strategy.h \
+	gp_configuration_history.h gp_id.h gp_policy.h gp_version.h \
+	gp_segment_config.h \
 	pg_window.h \
 	pg_exttable.h pg_appendonly.h aoseg.h \
 	gp_fastsequence.h pg_extprotocol.h \
@@ -85,8 +85,8 @@ postgres.shdescription: postgres.bki ;
 postgres_bki_srcs: process_col_defaults.pl $(POSTGRES_BKI_SRCS)
 	cat $(POSTGRES_BKI_SRCS) | $(PERL) process_col_defaults.pl > postgres_bki_srcs
 
-5.0.json: process_foreign_keys.pl $(POSTGRES_BKI_SRCS) $(top_srcdir)/src/include/catalog/catversion.h
-	cat $(POSTGRES_BKI_SRCS) $(top_srcdir)/src/include/catalog/catversion.h | $(PERL) process_foreign_keys.pl > 5.0.json
+6.json: process_foreign_keys.pl $(POSTGRES_BKI_SRCS) $(top_srcdir)/src/include/catalog/catversion.h
+	cat $(POSTGRES_BKI_SRCS) $(top_srcdir)/src/include/catalog/catversion.h | $(PERL) process_foreign_keys.pl > 6.json
 
 postgres.bki: genbki.sh postgres_bki_srcs $(top_srcdir)/src/include/pg_config_manual.h
 	AWK='$(AWK)' $(SHELL) $< $(pg_includes) --set-version=$(PG_VERSION) -o postgres postgres_bki_srcs
@@ -112,7 +112,7 @@ uninstall-data:
 
 # postgres_bki_srcs is in the distribution tarball, so it is not cleaned here.
 clean:
-	rm -f SUBSYS.o $(OBJS) $(BKIFILES)
+	rm -f $(BKIFILES)
 
 maintainer-clean: clean
 	rm -f postgres_bki_srcs

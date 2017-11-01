@@ -4,7 +4,12 @@
  *	  Provides storage areas and processing routines for Greenplum Database variables
  *	  managed by GUC.
  *
- * Copyright (c) 2003-2010, Greenplum inc
+ * Portions Copyright (c) 2003-2010, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
+ *
+ *
+ * IDENTIFICATION
+ *	    src/backend/cdb/cdbvars.c
  *
  *
  * NOTES
@@ -18,8 +23,8 @@
 #include "utils/guc.h"
 #include "catalog/gp_segment_config.h"
 #include "cdb/cdbvars.h"
-#include "gp-libpq-fe.h"
-#include "gp-libpq-int.h"
+#include "libpq-fe.h"
+#include "libpq-int.h"
 #include "cdb/cdbfts.h"
 #include "cdb/cdbdisp.h"
 #include "cdb/cdbutil.h"
@@ -47,12 +52,12 @@
 GpRoleValue Gp_role;			/* Role paid by this Greenplum Database
 								 * backend */
 char	   *gp_role_string;		/* Staging area for guc.c */
-char	   *gp_fault_action_string;		/* Staging area for guc.c */
+char	   *gp_fault_action_string; /* Staging area for guc.c */
 bool		gp_set_read_only;	/* Staging area for guc.c */
 
 GpRoleValue Gp_session_role;	/* Role paid by this Greenplum Database
 								 * backend */
-char	   *gp_session_role_string;		/* Staging area for guc.c */
+char	   *gp_session_role_string; /* Staging area for guc.c */
 
 bool		Gp_is_writer;		/* is this qExec a "writer" process. */
 
@@ -73,14 +78,13 @@ bool		Debug_resource_group;	/* Shall we log the resource group? */
 
 bool		gp_backup_directIO = false; /* disable\enable direct I/O dump */
 
-int			gp_backup_directIO_read_chunk_mb = 20;		/* size of readChunk
-														 * buffer for directIO
-														 * dump */
+int			gp_backup_directIO_read_chunk_mb = 20;	/* size of readChunk
+													 * buffer for directIO
+													 * dump */
 
-bool		gp_external_enable_exec = true;		/* allow ext tables with
-												 * EXECUTE */
+bool		gp_external_enable_exec = true; /* allow ext tables with EXECUTE */
 
-int			gp_external_max_segs;		/* max segdbs per gpfdist/gpfdists URI */
+int			gp_external_max_segs;	/* max segdbs per gpfdist/gpfdists URI */
 
 int			gp_safefswritesize; /* set for safe AO writes in non-mature fs */
 
@@ -98,18 +102,18 @@ bool		Gp_write_shared_snapshot;	/* tell the writer QE to write the
 bool		gp_reraise_signal = false;	/* try to dump core when we get
 										 * SIGABRT & SIGSEGV */
 
-bool		gp_set_proc_affinity = false;		/* set processor affinity (if
-												 * platform supports it) */
+bool		gp_set_proc_affinity = false;	/* set processor affinity (if
+											 * platform supports it) */
 
-int			gp_reject_percent_threshold;		/* SREH reject % kicks off
-												 * only after * <num> records
-												 * have been processed	*/
+int			gp_reject_percent_threshold;	/* SREH reject % kicks off only
+											 * after * <num> records have been
+											 * processed	*/
 
-int			gp_max_csv_line_length;		/* max allowed len for csv data line
-										 * in bytes */
+int			gp_max_csv_line_length; /* max allowed len for csv data line in
+									 * bytes */
 
-bool		gp_select_invisible = false;		/* debug mode to allow select
-												 * to see "invisible" rows */
+bool		gp_select_invisible = false;	/* debug mode to allow select to
+											 * see "invisible" rows */
 
 int			pgstat_track_activity_query_size = INT_MAX; /* max allowed len for
 														 * displaying the query
@@ -162,7 +166,7 @@ int			gp_fts_transition_timeout = 3600;
  * that a segment is in recovery mode we may be able to retry.
  */
 int			gp_gang_creation_retry_count = 5;	/* disable by default */
-int			gp_gang_creation_retry_timer = 2000;		/* 2000ms */
+int			gp_gang_creation_retry_timer = 2000;	/* 2000ms */
 
 /*
  * gp_enable_slow_writer_testmode
@@ -200,17 +204,18 @@ int			Gp_interconnect_min_rto = 20;
 int			Gp_interconnect_fc_method = INTERCONNECT_FC_METHOD_LOSS;
 int			Gp_interconnect_transmit_timeout = 3600;
 int			Gp_interconnect_min_retries_before_timeout = 100;
-int			Gp_interconnect_debug_retry_interval= 10;
+int			Gp_interconnect_debug_retry_interval = 10;
 
-int			Gp_interconnect_hash_multiplier = 2;		/* sets the size of the
-														 * hash table used by
-														 * the UDP-IC */
+int			Gp_interconnect_hash_multiplier = 2;	/* sets the size of the
+													 * hash table used by the
+													 * UDP-IC */
 
 int			interconnect_setup_timeout = 7200;
 
 int			Gp_interconnect_type = INTERCONNECT_TYPE_UDPIFC;
 
-bool		gp_interconnect_aggressive_retry = true; /* fast-track app-level retry */
+bool		gp_interconnect_aggressive_retry = true;	/* fast-track app-level
+														 * retry */
 
 bool		gp_interconnect_full_crc = false;	/* sanity check UDP data. */
 
@@ -275,9 +280,6 @@ int			gp_hashjoin_bloomfilter = 0;
 
 /* Analyzing aid */
 int			gp_motion_slice_noop = 0;
-#ifdef ENABLE_LTRACE
-int			gp_ltrace_flag = 0;
-#endif
 
 /* Greenplum Database Experimental Feature GUCs */
 int			gp_distinct_grouping_sets_threshold = 32;
@@ -509,6 +511,16 @@ assign_gp_session_role(const char *newval, bool doit, GucSource source __attribu
 	if (newrole == GP_ROLE_UNDEFINED)
 	{
 		return NULL;
+	}
+
+	/* Force utility mode in a stand-alone backend. */
+	if (!IsPostmasterEnvironment && newrole != GP_ROLE_UTILITY)
+	{
+		if (source != PGC_S_DEFAULT)
+			elog(WARNING, "gp_session_role forced to 'utility' in single-user mode");
+
+		newval = strdup("utility");
+		newrole = GP_ROLE_UTILITY;
 	}
 
 	if (doit)
@@ -750,7 +762,7 @@ gpvars_string_to_verbosity(const char *s)
 	else
 		result = GPVARS_VERBOSITY_UNDEFINED;
 	return result;
-}	/* gpvars_string_to_verbosity */
+}								/* gpvars_string_to_verbosity */
 
 /*
  * gpvars_verbosity_to_string
@@ -771,7 +783,7 @@ gpvars_verbosity_to_string(GpVars_Verbosity verbosity)
 		default:
 			return "*undefined*";
 	}
-}	/* gpvars_verbosity_to_string */
+}								/* gpvars_verbosity_to_string */
 
 /*
  * gpperfmon_log_alert_level_to_string
@@ -835,13 +847,13 @@ gpvars_assign_gp_log_gang(const char *newval, bool doit, GucSource source __attr
 	if (doit)
 		gp_log_gang = v;
 	return newval;
-}	/* gpvars_assign_gp_log_gangs */
+}								/* gpvars_assign_gp_log_gangs */
 
 const char *
 gpvars_show_gp_log_gang(void)
 {
 	return gpvars_verbosity_to_string(gp_log_gang);
-}	/* gpvars_show_gp_log_gangs */
+}								/* gpvars_show_gp_log_gangs */
 
 /*
  * gpvars_assign_gp_log_fts
@@ -857,13 +869,13 @@ gpvars_assign_gp_log_fts(const char *newval, bool doit, GucSource source __attri
 	if (doit)
 		gp_log_fts = v;
 	return newval;
-}	/* gpvars_assign_gp_log_fts */
+}								/* gpvars_assign_gp_log_fts */
 
 const char *
 gpvars_show_gp_log_fts(void)
 {
 	return gpvars_verbosity_to_string(gp_log_fts);
-}	/* gpvars_show_gp_log_fts */
+}								/* gpvars_show_gp_log_fts */
 
 /*
  * gpvars_assign_gp_log_interconnect
@@ -879,13 +891,13 @@ gpvars_assign_gp_log_interconnect(const char *newval, bool doit, GucSource sourc
 	if (doit)
 		gp_log_interconnect = v;
 	return newval;
-}	/* gpvars_assign_gp_log_interconnect */
+}								/* gpvars_assign_gp_log_interconnect */
 
 const char *
 gpvars_show_gp_log_interconnect(void)
 {
 	return gpvars_verbosity_to_string(gp_log_interconnect);
-}	/* gpvars_show_gp_log_interconnect */
+}								/* gpvars_show_gp_log_interconnect */
 
 
 /*
@@ -911,12 +923,12 @@ gpvars_assign_gp_interconnect_type(const char *newval, bool doit, GucSource sour
 	}
 
 	return newval;
-}	/* gpvars_assign_gp_log_interconnect */
+}								/* gpvars_assign_gp_log_interconnect */
 
 const char *
 gpvars_show_gp_interconnect_type(void)
 {
-	switch(Gp_interconnect_type)
+	switch (Gp_interconnect_type)
 	{
 		case INTERCONNECT_TYPE_TCP:
 			return "TCP";
@@ -924,7 +936,7 @@ gpvars_show_gp_interconnect_type(void)
 		default:
 			return "UDPIFC";
 	}
-}                               /* gpvars_show_gp_log_interconnect */
+}								/* gpvars_show_gp_log_interconnect */
 
 /*
  * gpvars_assign_gp_interconnect_fc_method
@@ -949,7 +961,7 @@ gpvars_assign_gp_interconnect_fc_method(const char *newval, bool doit, GucSource
 	}
 
 	return newval;
-}	/* gpvars_assign_gp_interconnect_fc_method */
+}								/* gpvars_assign_gp_interconnect_fc_method */
 
 const char *
 gpvars_show_gp_interconnect_fc_method(void)
@@ -963,7 +975,7 @@ gpvars_show_gp_interconnect_fc_method(void)
 		default:
 			return "CAPACITY";
 	}
-}	/* gpvars_show_gp_interconnect_fc_method */
+}								/* gpvars_show_gp_interconnect_fc_method */
 
 /*
  * Parse the string value of gp_autostats_mode and gp_autostats_mode_in_functions
@@ -1122,7 +1134,7 @@ gpvars_assign_gp_gpperfmon_send_interval(int newval, bool doit, GucSource source
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-			 errmsg("must be superuser to set gp_gpperfmon_send_interval")));
+					 errmsg("must be superuser to set gp_gpperfmon_send_interval")));
 		}
 		else
 		{
@@ -1221,7 +1233,7 @@ gpvars_assign_gp_resource_manager_policy(const char *newval, bool doit, GucSourc
 {
 	ResourceManagerPolicy newtype = RESOURCE_MANAGER_POLICY_QUEUE;
 
-	if (newval == NULL || newval[0] == 0 )
+	if (newval == NULL || newval[0] == 0)
 		newtype = RESOURCE_MANAGER_POLICY_QUEUE;
 	else if (!pg_strcasecmp("queue", newval))
 		newtype = RESOURCE_MANAGER_POLICY_QUEUE;
@@ -1238,8 +1250,8 @@ gpvars_assign_gp_resource_manager_policy(const char *newval, bool doit, GucSourc
 		Gp_resource_manager_policy = newtype;
 
 		/*
-		 * disable backoff mechanism of resource queue if we are going to enable
-		 * resource group
+		 * disable backoff mechanism of resource queue if we are going to
+		 * enable resource group
 		 */
 		if (newtype == RESOURCE_MANAGER_POLICY_GROUP)
 			gp_enable_resqueue_priority = false;
@@ -1262,24 +1274,6 @@ gpvars_show_gp_resource_manager_policy(void)
 			return "unknown";
 	}
 }
-
-/*
- * gpvars_assign_max_resource_groups
- */
-bool
-gpvars_assign_max_resource_groups(int newval, bool doit, GucSource source __attribute__((unused)))
-{
-	if (newval > MaxConnections)
-		elog(ERROR, "Invalid input for max_resource_groups. Must be no larger than max_connections(%d).", MaxConnections);
-
-	if (doit)
-	{
-		MaxResourceGroups = newval;
-	}
-
-	return true;
-}
-
 
 /*
  * gpvars_assign_gp_resqueue_memory_policy
@@ -1370,13 +1364,13 @@ gpvars_show_gp_resgroup_memory_policy(void)
 bool
 gpvars_assign_statement_mem(int newval, bool doit, GucSource source __attribute__((unused)))
 {
-	if (newval >= max_statement_mem)
-	{
-		elog(ERROR, "Invalid input for statement_mem. Must be less than max_statement_mem (%d kB).", max_statement_mem);
-	}
-
 	if (doit)
 	{
+		if (newval >= max_statement_mem)
+		{
+			elog(ERROR, "Invalid input for statement_mem. Must be less than max_statement_mem (%d kB).", max_statement_mem);
+		}
+
 		statement_mem = newval;
 	}
 

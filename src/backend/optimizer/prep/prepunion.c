@@ -18,12 +18,13 @@
  *
  *
  * Portions Copyright (c) 2006-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/prep/prepunion.c,v 1.156 2008/10/04 21:56:53 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/prep/prepunion.c,v 1.159 2008/10/21 20:42:53 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -36,7 +37,8 @@
 #include "cdb/cdbpartition.h"
 #include "commands/tablecmds.h"
 #include "nodes/makefuncs.h"
-#include "optimizer/clauses.h"
+#include "optimizer/paths.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
@@ -44,7 +46,6 @@
 #include "optimizer/tlist.h"
 #include "parser/parse_clause.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_expr.h"
 #include "parser/parsetree.h"
 #include "utils/lsyscache.h"
 
@@ -194,6 +195,7 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 		 * Generate plan for primitive subquery
 		 */
 		PlannerConfig *config = CopyPlannerConfig(root->config);
+		config->honor_order_by = false;
 		subplan = subquery_planner(root->glob, subquery,
 								   root,
 								   false,
@@ -265,7 +267,7 @@ recurse_set_operations(Node *setOp, PlannerInfo *root,
 												 refnames_tlist),
 							NULL,
 							plan);
-            plan->flow = pull_up_Flow(plan, plan->lefttree, false);
+            plan->flow = pull_up_Flow(plan, plan->lefttree);
 		}
 		return plan;
 	}
@@ -304,6 +306,7 @@ generate_recursion_plan(SetOperationStmt *setOp, PlannerInfo *root,
 	lplan = recurse_set_operations(setOp->larg, root, tuple_fraction,
 								   setOp->colTypes, false, -1,
 								   refnames_tlist, sortClauses);
+
 	/* The right plan will want to look at the left one ... */
 	root->non_recursive_plan = lplan;
 	rplan = recurse_set_operations(setOp->rarg, root, tuple_fraction,
@@ -374,7 +377,7 @@ generate_union_plan(SetOperationStmt *op, PlannerInfo *root,
 	if ( Gp_role == GP_ROLE_DISPATCH )
 	{
 		optype = choose_setop_type(planlist);
-		adjust_setop_arguments(planlist, optype);
+		adjust_setop_arguments(root, planlist, optype);
 	}
 	else if (Gp_role == GP_ROLE_UTILITY ||
 			 Gp_role == GP_ROLE_EXECUTE) /* MPP-2928 */
@@ -417,7 +420,7 @@ generate_union_plan(SetOperationStmt *op, PlannerInfo *root,
 			plan = (Plan *) make_sort_from_sortclauses(root, sortList, plan);
 			mark_sort_locus(plan); /* CDB */
 			plan = (Plan *) make_unique(plan, sortList);
-            plan->flow = pull_up_Flow(plan, plan->lefttree, true);
+            plan->flow = pull_up_Flow(plan, plan->lefttree);
 		}
 		*sortClauses = sortList;
 	}
@@ -462,7 +465,7 @@ generate_nonunion_plan(SetOperationStmt *op, PlannerInfo *root,
 	if ( Gp_role == GP_ROLE_DISPATCH )
 	{
 		optype = choose_setop_type(planlist);
-		adjust_setop_arguments(planlist, optype);
+		adjust_setop_arguments(root, planlist, optype);
 	}
 	else if ( Gp_role == GP_ROLE_UTILITY 
 			|| Gp_role == GP_ROLE_EXECUTE ) /* MPP-2928 */
@@ -524,7 +527,7 @@ generate_nonunion_plan(SetOperationStmt *op, PlannerInfo *root,
 			break;
 	}
 	plan = (Plan *) make_setop(cmd, plan, sortList, list_length(op->colTypes) + 1);
-    plan->flow = pull_up_Flow(plan, plan->lefttree, true);
+    plan->flow = pull_up_Flow(plan, plan->lefttree);
 
 	*sortClauses = sortList;
 
@@ -1336,23 +1339,26 @@ adjust_appendrel_attrs_mutator(Node *node, AppendRelInfoContext *ctx)
 			j->rtindex = appinfo->child_relid;
 		return (Node *) j;
 	}
-	if (IsA(node, InClauseInfo))
+	if (IsA(node, PlaceHolderVar))
 	{
-		/* Copy the InClauseInfo node with correct mutation of subnodes */
-		InClauseInfo *ininfo;
-
-		ininfo = (InClauseInfo *) expression_tree_mutator(node,
-											  adjust_appendrel_attrs_mutator,
-														  (void *) ctx);
-		/* now fix InClauseInfo's relid sets */
-		ininfo->righthand = adjust_relid_set(ininfo->righthand,
-											 appinfo->parent_relid,
-											 appinfo->child_relid);
-		return (Node *) ininfo;
+		/* Copy the PlaceHolderVar node with correct mutation of subnodes */
+		PlaceHolderVar *phv;
+		
+		phv = (PlaceHolderVar *) expression_tree_mutator(node,
+														 adjust_appendrel_attrs_mutator,
+														 (void *) ctx);
+		/* now fix PlaceHolderVar's relid sets */
+		if (phv->phlevelsup == 0)
+			phv->phrels = adjust_relid_set(phv->phrels,
+										   appinfo->parent_relid,
+										   appinfo->child_relid);
+		return (Node *) phv;
 	}
-	/* Shouldn't need to handle OuterJoinInfo or AppendRelInfo here */
-	Assert(!IsA(node, OuterJoinInfo));
+
+	/* Shouldn't need to handle planner auxiliary nodes here */
+	Assert(!IsA(node, SpecialJoinInfo));
 	Assert(!IsA(node, AppendRelInfo));
+	Assert(!IsA(node, PlaceHolderInfo));
 
 	/*
 	 * We have to process RestrictInfo nodes specially.
@@ -1367,11 +1373,11 @@ adjust_appendrel_attrs_mutator(Node *node, AppendRelInfoContext *ctx)
 
 		/* Recursively fix the clause itself */
 		newinfo->clause = (Expr *)
-			adjust_appendrel_attrs_mutator((Node *) oldinfo->clause, ctx);
+				adjust_appendrel_attrs_mutator((Node *) oldinfo->clause, ctx);
 
 		/* and the modified version, if an OR clause */
 		newinfo->orclause = (Expr *)
-			adjust_appendrel_attrs_mutator((Node *) oldinfo->orclause, ctx);
+				adjust_appendrel_attrs_mutator((Node *) oldinfo->orclause, ctx);
 
 		/* adjust relid sets too */
 		newinfo->clause_relids = adjust_relid_set(oldinfo->clause_relids,

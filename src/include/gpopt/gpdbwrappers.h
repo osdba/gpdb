@@ -206,6 +206,9 @@ namespace gpdb {
 	// data access property of given function
 	char CFuncDataAccess(Oid funcid);
 
+	// exec location property of given function
+	char CFuncExecLocation(Oid funcid);
+
 	// trigger name
 	char *SzTriggerName(Oid triggerid);
 
@@ -535,6 +538,9 @@ namespace gpdb {
 	// get external table entry with given oid
 	ExtTableEntry *Pexttable(Oid relationId);
 
+	// get external table entry with given oid
+	List *PlExternalScanUriList(ExtTableEntry *ext, bool *isMasterOnlyP);
+
 	// return the first member of the given targetlist whose expression is
 	// equal to the given expression, or NULL if no such member exists
 	TargetEntry *PteMember(Node *node, List *targetlist);
@@ -628,6 +634,11 @@ namespace gpdb {
 	// Does the metadata cache need to be reset (because of a catalog
 	// table has been changed?)
 	bool FMDCacheNeedsReset(void);
+
+	// functions for tracking ORCA memory consumption
+	void *OptimizerAlloc(size_t size);
+
+	void OptimizerFree(void *ptr);
 
 } //namespace gpdb
 

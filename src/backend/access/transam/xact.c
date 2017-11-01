@@ -10,7 +10,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/access/transam/xact.c,v 1.257.2.8 2010/07/23 00:43:26 rhaas Exp $
+ *	  $PostgreSQL: pgsql/src/backend/access/transam/xact.c,v 1.262 2008/03/26 18:48:59 alvherre Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -25,9 +25,6 @@
 #include "access/subtrans.h"
 #include "access/transam.h"
 #include "access/twophase.h"
-#include "cdb/cdblocaldistribxact.h"
-#include "cdb/cdbdistributedsnapshot.h"
-#include "cdb/cdbtm.h"
 #include "access/xlogutils.h"
 #include "access/fileam.h"
 #include "catalog/namespace.h"
@@ -58,14 +55,18 @@
 #include "utils/relcache.h"
 #include "utils/resource_manager.h"
 #include "utils/sharedsnapshot.h"
-#include "access/distributedlog.h"
 #include "access/clog.h"
-#include "utils/vmem_tracker.h"
+#include "utils/snapmgr.h"
+#include "pg_trace.h"
 
+#include "access/distributedlog.h"
+#include "cdb/cdbdistributedsnapshot.h"
 #include "cdb/cdbgang.h"
-#include "cdb/cdbvars.h" /* Gp_role, Gp_is_writer, interconnect_setup_timeout */
-
+#include "cdb/cdblocaldistribxact.h"
 #include "cdb/cdbpersistentstore.h"
+#include "cdb/cdbtm.h"
+#include "cdb/cdbvars.h" /* Gp_role, Gp_is_writer, interconnect_setup_timeout */
+#include "utils/vmem_tracker.h"
 
 /*
  *	User-tweakable parameters
@@ -80,14 +81,16 @@ bool		XactSyncCommit = true;
 
 int			CommitDelay = 0;	/* precommit delay in microseconds */
 int			CommitSiblings = 5; /* # concurrent xacts needed to sleep */
-#if 0 /* Upstream code not applicable to GPDB */
+
 /*
  * MyXactAccessedTempRel is set when a temporary relation is accessed.
  * We don't allow PREPARE TRANSACTION in that case.  (This is global
  * so that it can be set from heapam.c.)
+ *
+ * Not used in GPDB, see comments in PrepareTransaction()
  */
 bool		MyXactAccessedTempRel = false;
-#endif
+
 int32 gp_subtrans_warn_limit = 16777216; /* 16 million */
 
 /* gp-specific
@@ -148,7 +151,6 @@ typedef enum TBlockState
  */
 typedef struct TransactionStateData
 {
-	DistributedTransactionId distribXid;	/* My distributed transaction id, or Invalid if none. */
 	TransactionId transactionId;	/* my XID, or Invalid if none */
 	SubTransactionId subTransactionId;	/* my subxact ID */
 	char	   *name;			/* savepoint name, if any */
@@ -183,7 +185,6 @@ static TransactionState previousFastLink;
  * transaction at all, or when in a top-level transaction.
  */
 static TransactionStateData TopTransactionStateData = {
-	0,							/* distributed transaction id */
 	0,							/* transaction id */
 	0,							/* subtransaction id */
 	NULL,						/* savepoint name */
@@ -207,6 +208,9 @@ static TransactionStateData TopTransactionStateData = {
 };
 
 static TransactionState CurrentTransactionState = &TopTransactionStateData;
+
+/* distributed transaction id of current transaction, if any. */
+static DistributedTransactionId currentDistribXid;
 
 /*
  * The subtransaction ID and command ID assignment counters are global
@@ -285,6 +289,7 @@ File subxip_file = 0;
 
 /* local function prototypes */
 static void AssignTransactionId(TransactionState s);
+static void AbortTransaction(void);
 static void AtAbort_Memory(void);
 static void AtCleanup_Memory(void);
 static void AtAbort_ResourceOwner(void);
@@ -299,7 +304,9 @@ static void CallSubXactCallbacks(SubXactEvent event,
 					 SubTransactionId mySubid,
 					 SubTransactionId parentSubid);
 static void CleanupTransaction(void);
+static void CommitTransaction(void);
 static TransactionId RecordTransactionAbort(bool isSubXact);
+static void StartTransaction(void);
 
 static void RecordSubTransactionCommit(void);
 static void StartSubTransaction(void);
@@ -325,14 +332,6 @@ static void DispatchRollbackToSavepoint(char *name);
 static bool IsCurrentTransactionIdForReader(TransactionId xid);
 
 extern void FtsCondSetTxnReadOnly(bool *);
-
-/*
- * Make the following three functions external because old dtrace
- * cannot reference static symbol.
- */
-extern void StartTransaction(void);
-extern void CommitTransaction(void);
-extern void AbortTransaction(void);
 
 char *
 XactInfoKind_Name(const XactInfoKind		kind)
@@ -415,7 +414,7 @@ GetAllTransactionXids(
 {
 	TransactionState s = CurrentTransactionState;
 
-	*distribXid = s->distribXid;
+	*distribXid = currentDistribXid;
 	*localXid = s->transactionId;
 	*subXid = s->subTransactionId;
 }
@@ -542,7 +541,8 @@ AssignTransactionId(TransactionState s)
 	 * the Xid as "running".  See GetNewTransactionId.
 	 */
 	s->transactionId = GetNewTransactionId(isSubXact, true);
-	elog((Debug_print_full_dtm ? LOG : DEBUG5), "AssignTransactionId(): assigned xid %u", s->transactionId);
+	ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+			(errmsg("AssignTransactionId(): assigned xid %u", s->transactionId)));
 
 	if (isSubXact)
 	{
@@ -779,7 +779,8 @@ bool IsCurrentTransactionIdForReader(TransactionId xid) {
 		 */
 		if (TransactionIdEquals(xid, writer_xid))
 		{
-			elog((Debug_print_full_dtm ? LOG : DEBUG5),"qExec Reader CheckSharedSnapshotForSubtransaction(xid = %u) = true -- TOP", xid);
+			ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+					(errmsg("qExec Reader CheckSharedSnapshotForSubtransaction(xid = %u) = true -- TOP", xid)));
 			isCurrent = true;
 		}
 		else
@@ -847,9 +848,9 @@ TransactionIdIsCurrentTransactionId(TransactionId xid)
 	{
 		isCurrentTransactionId = IsCurrentTransactionIdForReader(xid);
 
-		elog((Debug_print_full_dtm ? LOG : DEBUG5),
-		     "qExec Reader CheckSharedSnapshotForSubtransaction(xid = %u) = %s -- Subtransaction",
-		     xid, (isCurrentTransactionId ? "true" : "false"));
+		ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+				(errmsg("qExec Reader CheckSharedSnapshotForSubtransaction(xid = %u) = %s -- Subtransaction",
+						xid, (isCurrentTransactionId ? "true" : "false"))));
 
 		return isCurrentTransactionId;
 	}
@@ -1468,8 +1469,6 @@ cleanup:
 
 	if (persistentCommitBuffer != NULL)
 		pfree(persistentCommitBuffer);
-	if (children)
-		pfree(children);
 
 	return latestXid;
 }
@@ -2191,11 +2190,11 @@ SetSharedTransactionId_writer(void)
 		   DistributedTransactionContext == DTX_CONTEXT_QE_TWO_PHASE_IMPLICIT_WRITER ||
 		   DistributedTransactionContext == DTX_CONTEXT_QE_AUTO_COMMIT_IMPLICIT);
 
-	elog((Debug_print_full_dtm ? LOG : DEBUG5),
-		 "%s setting shared xid %u -> %u",
-		 DtxContextToString(DistributedTransactionContext),
-		 SharedLocalSnapshotSlot->xid,
-		 TopTransactionStateData.transactionId);
+	ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+			(errmsg("%s setting shared xid %u -> %u",
+					DtxContextToString(DistributedTransactionContext),
+					SharedLocalSnapshotSlot->xid,
+					TopTransactionStateData.transactionId)));
 	SharedLocalSnapshotSlot->xid = TopTransactionStateData.transactionId;
 }
 
@@ -2214,16 +2213,16 @@ SetSharedTransactionId_reader(TransactionId xid, CommandId cid)
 	 */
 	TopTransactionStateData.transactionId = xid;
 	currentCommandId = cid;
-	elog((Debug_print_full_dtm ? LOG : DEBUG5),
-		 "qExec READER setting local xid=%u, cid=%u (distributedXid %u/%u)",
-		 TopTransactionStateData.transactionId, currentCommandId,
-		 QEDtxContextInfo.distributedXid, QEDtxContextInfo.segmateSync);
+	ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+			(errmsg("qExec READER setting local xid=%u, cid=%u (distributedXid %u/%u)",
+					TopTransactionStateData.transactionId, currentCommandId,
+					QEDtxContextInfo.distributedXid, QEDtxContextInfo.segmateSync)));
 }
 
 /*
  *	StartTransaction
  */
-void
+static void
 StartTransaction(void)
 {
 	TransactionState s;
@@ -2233,6 +2232,18 @@ StartTransaction(void)
 	{
 		SIMPLE_FAULT_INJECTOR(TransactionStartUnderEntryDbSingleton);
 	}
+
+	/*
+	 * Acquire a resource group slot.
+	 *
+	 * AssignResGroupOnMaster() might throw error, so call it before touch
+	 * transaction state.
+	 * Slot is successfully acquired when AssignResGroupOnMaster() is returned,
+	 * this slot will be release when transaction is committed or abortted,
+	 * so don't error out before transaction state is set to TRANS_START.
+	 */
+	if (ShouldAssignResGroupOnMaster())
+		AssignResGroupOnMaster();
 
 	/*
 	 * Let's just make sure the state stack is empty
@@ -2246,11 +2257,6 @@ StartTransaction(void)
 	if (s->state != TRANS_DEFAULT)
 		elog(WARNING, "StartTransaction while in %s state",
 			 TransStateAsString(s->state));
-
-	/* Acquire a resource group slot at the beginning of a transaction */
-	if (ShouldAssignResGroupOnMaster())
-		AssignResGroupOnMaster();
-
 	/*
 	 * set the current transaction state information appropriately during
 	 * start processing
@@ -2265,9 +2271,7 @@ StartTransaction(void)
 	XactIsoLevel = DefaultXactIsoLevel;
 	XactReadOnly = DefaultXactReadOnly;
 	forceSyncCommit = false;
-#if 0 /* Upstream code not applicable to GPDB */
 	MyXactAccessedTempRel = false;
-#endif
 	seqXlogWrite = false;
 
 	/* set read only by fts, if any fts action is read only */
@@ -2320,7 +2324,7 @@ StartTransaction(void)
 			 * distributed transaction to a local transaction id for the
 			 * master database.
 			 */
-			createDtx(&s->distribXid);
+			createDtx(&currentDistribXid);
 
 			if (SharedLocalSnapshotSlot != NULL)
 			{
@@ -2329,9 +2333,9 @@ StartTransaction(void)
 				SharedLocalSnapshotSlot->startTimestamp = stmtStartTimestamp;
 				LWLockRelease(SharedLocalSnapshotSlot->slotLock);
 
-				elog((Debug_print_full_dtm ? LOG : DEBUG5),
-					 "setting SharedLocalSnapshotSlot->startTimestamp = " INT64_FORMAT "[old=" INT64_FORMAT "])",
-					 stmtStartTimestamp, oldStartTimestamp);
+				ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+						(errmsg("setting SharedLocalSnapshotSlot->startTimestamp = " INT64_FORMAT "[old=" INT64_FORMAT "])",
+								stmtStartTimestamp, oldStartTimestamp)));
 			}
 		}
 		break;
@@ -2371,7 +2375,7 @@ StartTransaction(void)
 			if (DistributedTransactionContext == DTX_CONTEXT_QE_TWO_PHASE_EXPLICIT_WRITER ||
 				DistributedTransactionContext == DTX_CONTEXT_QE_TWO_PHASE_IMPLICIT_WRITER)
 			{
-				s->distribXid = QEDtxContextInfo.distributedXid;
+				currentDistribXid = QEDtxContextInfo.distributedXid;
 
 				Assert(QEDtxContextInfo.distributedTimeStamp != 0);
 				Assert(QEDtxContextInfo.distributedXid != InvalidDistributedTransactionId);
@@ -2396,15 +2400,15 @@ StartTransaction(void)
 				SharedLocalSnapshotSlot->pid = MyProc->pid;
 				SharedLocalSnapshotSlot->writer_proc = MyProc;
 
-				elog((Debug_print_full_dtm ? LOG : DEBUG5),
-					 "qExec writer setting distributedXid: %d sharedQDxid %d (shared xid %u -> %u) ready %s (shared timeStamp = " INT64_FORMAT " -> " INT64_FORMAT ")",
-					 QEDtxContextInfo.distributedXid,
-					 SharedLocalSnapshotSlot->QDxid,
-					 SharedLocalSnapshotSlot->xid,
-					 s->transactionId,
-					 SharedLocalSnapshotSlot->ready ? "true" : "false",
-					 SharedLocalSnapshotSlot->startTimestamp,
-					 xactStartTimestamp);
+				ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+						(errmsg("qExec writer setting distributedXid: %d sharedQDxid %d (shared xid %u -> %u) ready %s (shared timeStamp = " INT64_FORMAT " -> " INT64_FORMAT ")",
+								QEDtxContextInfo.distributedXid,
+								SharedLocalSnapshotSlot->QDxid,
+								SharedLocalSnapshotSlot->xid,
+								s->transactionId,
+								SharedLocalSnapshotSlot->ready ? "true" : "false",
+								SharedLocalSnapshotSlot->startTimestamp,
+								xactStartTimestamp)));
 				LWLockRelease(SharedLocalSnapshotSlot->slotLock);
 			}
 		}
@@ -2417,14 +2421,15 @@ StartTransaction(void)
 			 * MPP: we're a QE Reader.
 			 */
 			Assert (SharedLocalSnapshotSlot != NULL);
-			s->distribXid = QEDtxContextInfo.distributedXid;
+			currentDistribXid = QEDtxContextInfo.distributedXid;
 
-			elog((Debug_print_full_dtm ? LOG : DEBUG5), "qExec reader: distributedXid %d currcid %d gxid = %u DtxContext '%s' sharedsnapshots: %s",
-				 QEDtxContextInfo.distributedXid,
-				 QEDtxContextInfo.curcid,
-				 getDistributedTransactionId(),
-				 DtxContextToString(DistributedTransactionContext),
-				 SharedSnapshotDump());
+			ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+					(errmsg("qExec reader: distributedXid %d currcid %d gxid = %u DtxContext '%s' sharedsnapshots: %s",
+							QEDtxContextInfo.distributedXid,
+							QEDtxContextInfo.curcid,
+							getDistributedTransactionId(),
+							DtxContextToString(DistributedTransactionContext),
+							SharedSnapshotDump())));
 		}
 		break;
 	
@@ -2439,13 +2444,13 @@ StartTransaction(void)
 			break;
 	}
 
-	elog((Debug_print_snapshot_dtm ? LOG : DEBUG5),
-		 "[Distributed Snapshot #%u] *StartTransaction* (gxid = %u, xid = %u, '%s')", 
-		 (SerializableSnapshot == NULL ? 0 :
-		  SerializableSnapshot->distribSnapshotWithLocalMapping.ds.distribSnapshotId),
-		 getDistributedTransactionId(),
-		 s->transactionId,
-		 DtxContextToString(DistributedTransactionContext));
+	ereport((Debug_print_snapshot_dtm ? LOG : DEBUG5),
+			(errmsg("[Distributed Snapshot #%u] *StartTransaction* (gxid = %u, xid = %u, '%s')",
+					(SerializableSnapshot == NULL ? 0 :
+					 SerializableSnapshot->distribSnapshotWithLocalMapping.ds.distribSnapshotId),
+					getDistributedTransactionId(),
+					s->transactionId,
+					DtxContextToString(DistributedTransactionContext))));
 
 	/*
 	 * Assign a new LocalTransactionId, and combine it with the backendId to
@@ -2466,7 +2471,7 @@ StartTransaction(void)
 	Assert(MyProc->backendId == vxid.backendId);
 	MyProc->lxid = vxid.localTransactionId;
 
-	PG_TRACE1(transaction__start, vxid.localTransactionId);
+	TRACE_POSTGRESQL_TRANSACTION_START(vxid.localTransactionId);
 
 	/*
 	 * set transaction_timestamp() (a/k/a now()).  We want this to be the same
@@ -2508,10 +2513,10 @@ StartTransaction(void)
 
 	ShowTransactionState("StartTransaction");
 
-	elog((Debug_print_full_dtm ? LOG : DEBUG5),
-		 "StartTransaction in DTX Context = '%s', %s",
-		 DtxContextToString(DistributedTransactionContext),
-	     LocalDistribXact_DisplayString(MyProc));
+	ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+			(errmsg("StartTransaction in DTX Context = '%s', %s",
+					DtxContextToString(DistributedTransactionContext),
+					LocalDistribXact_DisplayString(MyProc))));
 }
 
 /*
@@ -2519,7 +2524,7 @@ StartTransaction(void)
  *
  * NB: if you change this routine, better look at PrepareTransaction too!
  */
-void
+static void
 CommitTransaction(void)
 {
 	MIRRORED_LOCK_DECLARE;
@@ -2677,7 +2682,7 @@ CommitTransaction(void)
 	 */
 	latestXid = RecordTransactionCommit();
 
-	PG_TRACE1(transaction__commit, MyProc->lxid);
+	TRACE_POSTGRESQL_TRANSACTION_COMMIT(MyProc->lxid);
 
 	/*
 	 * Let others know about no transaction in progress by me. Note that this
@@ -2814,7 +2819,7 @@ CommitTransaction(void)
 		LocalDistribXactCache_ShowStats("CommitTransaction");
 	}
 
-	s->distribXid = InvalidDistributedTransactionId;
+	currentDistribXid = InvalidDistributedTransactionId;
 	s->transactionId = InvalidTransactionId;
 	s->subTransactionId = InvalidSubTransactionId;
 	s->nestingLevel = 0;
@@ -2836,8 +2841,8 @@ CommitTransaction(void)
 	freeGangsForPortal(NULL);
 
 	/* Release resource group slot at the end of a transaction */
-	if (ShouldAssignResGroupOnMaster())
-		UnassignResGroupOnMaster();
+	if (ShouldUnassignResGroup())
+		UnassignResGroup();
 }
 
 
@@ -3105,7 +3110,7 @@ PrepareTransaction(void)
 		LocalDistribXactCache_ShowStats("PrepareTransaction");
 	}
 
-	s->distribXid = InvalidDistributedTransactionId;
+	currentDistribXid = InvalidDistributedTransactionId;
 	s->transactionId = InvalidTransactionId;
 	s->subTransactionId = InvalidSubTransactionId;
 	s->nestingLevel = 0;
@@ -3128,7 +3133,7 @@ PrepareTransaction(void)
 /*
  *	AbortTransaction
  */
-void
+static void
 AbortTransaction(void)
 {
 	MIRRORED_LOCK_DECLARE;
@@ -3247,7 +3252,7 @@ AbortTransaction(void)
 	 */
 	latestXid = RecordTransactionAbort(false);
 
-	PG_TRACE1(transaction__abort, MyProc->lxid);
+	TRACE_POSTGRESQL_TRANSACTION_ABORT(MyProc->lxid);
 
 	/*
 	 * Let others know about no transaction in progress by me. Note that this
@@ -3370,7 +3375,7 @@ CleanupTransaction(void)
 
 	AtCleanup_Memory();			/* and transaction memory */
 
-	s->distribXid = InvalidDistributedTransactionId;
+	currentDistribXid = InvalidDistributedTransactionId;
 	s->transactionId = InvalidTransactionId;
 	s->subTransactionId = InvalidSubTransactionId;
 	s->nestingLevel = 0;
@@ -3389,8 +3394,8 @@ CleanupTransaction(void)
 	finishDistributedTransactionContext("CleanupTransaction", true);
 
 	/* Release resource group slot at the end of a transaction */
-	if (ShouldAssignResGroupOnMaster())
-		UnassignResGroupOnMaster();
+	if (ShouldUnassignResGroup())
+		UnassignResGroup();
 }
 
 /*
@@ -3463,11 +3468,10 @@ StartTransactionCommand(void)
 
 				LWLockRelease(SharedLocalSnapshotSlot->slotLock);
 
-				elog((Debug_print_full_dtm ? LOG : DEBUG3),
-						"qExec WRITER updating shared xid: %u -> %u (StartTransactionCommand) timestamp: "
-						INT64_FORMAT " -> " INT64_FORMAT ")",
-						oldXid, s->transactionId,
-						oldStartTimestamp, xactStartTimestamp);
+				ereport((Debug_print_full_dtm ? LOG : DEBUG3),
+						(errmsg("qExec WRITER updating shared xid: %u -> %u (StartTransactionCommand) timestamp: " INT64_FORMAT " -> " INT64_FORMAT ")",
+								oldXid, s->transactionId,
+								oldStartTimestamp, xactStartTimestamp)));
 			}
 			break;
 
@@ -4544,35 +4548,18 @@ DefineDispatchSavepoint(char *name)
 	/* First we attempt to create on the QEs */
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		char	   *cmd = NULL;
-		bool		freecmd;
+		char	   *cmd;
 
-		if (name != NULL)
-		{
-			cmd = palloc(sizeof("SAVEPOINT ") + strlen(name));
-			Assert(cmd != NULL);
-			if (cmd == NULL)
-				elog(ERROR, "Can't define savepoint name too long (%s)", name);
-			sprintf(cmd, "SAVEPOINT %s", name);
-			freecmd = true;
-		}
-		else
-		{
-			cmd = "SAVEPOINT";
-			freecmd = false;
-		}
+		cmd = psprintf("SAVEPOINT %s", name);
 
 		/*
 		 * dispatch a DTX command, in the event of an error, this call
 		 * will either exit via elog()/ereport() or return false
 		 */
 		if (!dispatchDtxCommand(cmd))
-		{
 			elog(ERROR, "Could not create a new savepoint (%s)", cmd);
-		}
 
-		if (freecmd)
-			pfree(cmd);
+		pfree(cmd);
 	}
 
 	DefineSavepoint(name);
@@ -4692,35 +4679,18 @@ ReleaseSavepoint(List *options)
 
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		char	   *cmd = NULL;
-		bool		freecmd;
+		char	   *cmd;
 
-		if (name != NULL)
-		{
-			cmd = palloc(sizeof("RELEASE SAVEPOINT ") + strlen(name));
-			Assert(cmd != NULL);
-			if (cmd == NULL)
-				elog(ERROR, "Can't release savepoint name too long (%s)", name);
-			sprintf(cmd, "RELEASE SAVEPOINT %s", name);
-			freecmd = true;
-		}
-		else
-		{
-			cmd = "RELEASE SAVEPOINT";
-			freecmd = false;
-		}
+		cmd = psprintf("RELEASE SAVEPOINT %s", name);
 
 		/*
 		 * dispatch a DTX command, in the event of an error, this call will
 		 * either exit via elog()/ereport() or return false
 		 */
 		if (!dispatchDtxCommand(cmd))
-		{
 			elog(ERROR, "Could not release savepoint (%s)", cmd);
-		}
 
-		if (freecmd)
-			pfree(cmd);
+		pfree(cmd);
 	}
 
 	for (target = s; PointerIsValid(target); target = target->parent)
@@ -4873,34 +4843,20 @@ static void
 DispatchRollbackToSavepoint(char *name)
 {
 	char	   *cmd;
-	bool		freecmd;
 
-	if (name != NULL)
-	{
-		cmd = palloc(sizeof("ROLLBACK TO SAVEPOINT ") + strlen(name));
-		Assert(cmd != NULL);
-		if (cmd == NULL)
-			elog(ERROR, "Can't rollback to savepoint, name too long (%s)", name);
-		sprintf(cmd, "ROLLBACK TO SAVEPOINT %s", name);
-		freecmd = true;
-	}
-	else
-	{
-		cmd = "ROLLBACK TO SAVEPOINT";
-		freecmd = false;
-	}
+	if (!name)
+		elog(ERROR, "could not find savepoint name for ROLLBACK TO SAVEPOINT");
+
+	cmd = psprintf("ROLLBACK TO SAVEPOINT %s", name);
 
 	/*
 	 * dispatch a DTX command, in the event of an error, this call will
 	 * either exit via elog()/ereport() or return false
 	 */
 	if (!dispatchDtxCommand(cmd))
-	{
 		elog(ERROR, "Could not rollback to savepoint (%s)", cmd);
-	}
 
-	if (freecmd)
-		pfree(cmd);
+	pfree(cmd);
 }
 
 /*
@@ -5200,7 +5156,8 @@ ExecutorMarkTransactionDoesWrites(void)
 	// UNDONE: Verify we are in transaction...
 	if (!TopTransactionStateData.executorSaysXactDoesWrites)
 	{
-		elog((Debug_print_full_dtm ? LOG : DEBUG5), "ExecutorMarkTransactionDoesWrites called");
+		ereport((Debug_print_full_dtm ? LOG : DEBUG5),
+				(errmsg("ExecutorMarkTransactionDoesWrites called")));
 		TopTransactionStateData.executorSaysXactDoesWrites = true;
 	}
 }
@@ -5249,6 +5206,9 @@ TransactionBlockStatusCode(void)
 	return 0;					/* keep compiler quiet */
 }
 
+/*
+ * IsSubTransaction
+ */
 bool
 IsSubTransaction(void)
 {
@@ -5592,7 +5552,6 @@ PushTransaction(void)
 	 * We can now stack a minimally valid subtransaction without fear of
 	 * failure.
 	 */
-	s->distribXid = p->distribXid;
 	s->transactionId = InvalidTransactionId;	/* until assigned */
 	s->subTransactionId = currentSubTransactionId;
 	s->parent = p;

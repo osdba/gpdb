@@ -4,12 +4,13 @@
  *	  Routines to handle limiting of query results where appropriate
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
+ * Portions Copyright (c) 2012-Present Pivotal Software, Inc.
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeLimit.c,v 1.33 2008/01/01 19:45:49 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeLimit.c,v 1.34 2008/03/10 03:37:59 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -264,7 +265,9 @@ recompute_limits(LimitState *node)
 		{
 			node->offset = DatumGetInt64(val);
 			if (node->offset < 0)
-				node->offset = 0;
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("OFFSET must not be negative")));
 		}
 	}
 	else
@@ -289,7 +292,9 @@ recompute_limits(LimitState *node)
 		{
 			node->count = DatumGetInt64(val);
 			if (node->count < 0)
-				node->count = 0;
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("LIMIT must not be negative")));
 			node->noCount = false;
 		}
 	}
